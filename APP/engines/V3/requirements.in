@@ -1,0 +1,12 @@
+# CUDA wheels are installed from the official PyTorch cu126 index.
+torch==2.12.1
+torchvision==0.27.1
+
+# Permissive model-architecture loader.
+spandrel==0.4.2
+
+# Image I/O and repeatable QA.
+numpy==2.4.4
+Pillow==12.3.0
+opencv-python-headless==5.0.0.93
+scikit-image==0.26.0

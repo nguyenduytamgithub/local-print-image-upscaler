@@ -1,0 +1,65 @@
+# User images and generated artifacts
+/INPUT/**
+!/INPUT/.gitkeep
+/OUTPUT/**
+!/OUTPUT/.gitkeep
+/APP/masters/
+/APP/manifests/
+/APP/verification/
+/APP/work/
+
+# Machine-specific reports and QA artifacts
+/HUONG_DAN.txt
+/APP/engines/V3/ENV_INFO.txt
+/APP/engines/V3/QA_REPORT.md
+/APP/engines/V3/qa/
+/APP/engines/V3/work/
+/APP/engines/*/output/
+/APP/engines/V3/src/audit_v2_v3.py
+/APP/engines/V3/src/qa_compare.py
+
+# Reproducible runtimes, models and third-party binaries
+/APP/engines/V3/.python/
+/APP/engines/V3/.venv/
+/APP/engines/V3/models/
+/APP/engines/V3/tools/
+/APP/engines/V2/tools/
+/APP/shared/tools/
+
+# Future-proof guards against accidentally committing a new runtime/model path
+**/.venv/
+**/venv/
+**/runtime/
+**/models/
+**/tools/
+*.pth
+*.pt
+*.onnx
+*.safetensors
+*.ckpt
+*.bin
+
+# Local artwork is private by default. Deliberate README assets may live here.
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.tif
+*.tiff
+!/docs/assets/**
+!/assets/**
+
+# Python/build/editor temporary files
+**/__pycache__/
+*.py[cod]
+*.new
+*.part
+*.tmp
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
