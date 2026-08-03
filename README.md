@@ -1,9 +1,9 @@
-# Local Print Image Upscaler — V2, V3 và V4 Print
+# Local Print Image Upscaler — V2/V3/V4 Print và V5 Smart Layers
 
 Chương trình xử lý ảnh cục bộ trên Windows cho bảng hiệu, poster và file in khổ lớn.
 Ảnh nguồn không được gửi lên dịch vụ đám mây.
 
-## Bốn chế độ
+## Năm chế độ
 
 | Chế độ | Đầu ra chính | Khi nên dùng |
 |---|---|---|
@@ -11,6 +11,14 @@ Chương trình xử lý ảnh cục bộ trên Windows cho bảng hiệu, poste
 | **V3 High** | PNG AI chất lượng cao | Ảnh chụp hoặc ảnh nhiều texture, máy có NVIDIA CUDA |
 | **V4 Print** | Raster AI/USM đã qua ablation + SVG/PDF/X-4 + PNG | Bản in nghiêm túc, cần phục hồi đồng đều toàn ảnh bằng NVIDIA CUDA |
 | **V4 Vector** | SVG/PDF/X-4 toàn path | Logo, chữ, mảng màu phẳng; không dùng cho ảnh chụp/gradient |
+| **V5 Smart Layers** | OpenRaster + PNG/mask ZIP; PSD khi trong giới hạn | Tách ảnh phẳng thành số lượng layer raster hữu ích để sửa trong Photoshop/Krita/Photopea/Canva |
+
+V5 là engine độc lập và không xóa V2/V3/V4. Nó dùng SAM 2.1 để tìm vùng, tự phân luồng
+poster/đồ họa với ảnh tự nhiên nhiều texture, rồi gộp theo panel, hàng, màu, hình học và quan hệ
+cha–con trong giới hạn số layer. Grounding DINO chỉ cung cấp nhãn gợi ý; Tesseract cùng model
+`tessdata_best` tiếng Việt đã pin cung cấp vùng/dòng OCR khi máy có Tesseract 5.
+Nền phía dưới vật thể được tái tạo nhưng luôn ghi rõ là **synthesized**: ảnh phẳng không chứa
+pixel vốn bị che, nên không thuật toán nào chứng minh được nền gốc chính xác.
 
 V4 không đổi đuôi giả. Chế độ `print` tạo một tài liệu mixed vector/raster đúng bản chất:
 lớp raster nhìn thấy là ứng viên **đồng nhất toàn ảnh** thắng QA và ablation ở pixel native x4.
@@ -67,9 +75,15 @@ Bỏ ảnh vào `INPUT`, rồi chạy một trong các lệnh:
 
 # V4 toàn vector cho logo/artwork phẳng
 .\upscale vector logo.png 4 --width-mm 3000
+
+# V5 tách layer ở kích thước gốc — nên dùng để chỉnh sửa nhẹ
+.\upscale layers poster.png 1
+
+# V5 layer x4 trên master AI V3 — cần bộ model V3
+.\upscale layers poster.png 4
 ```
 
-Tên file có khoảng trắng phải đặt trong dấu ngoặc kép. Có thể dùng `v2`, `v3` hoặc `v4`;
+Tên file có khoảng trắng phải đặt trong dấu ngoặc kép. Có thể dùng `v2`, `v3`, `v4` hoặc `v5`;
 `vector` là chế độ V4 toàn path riêng, không phải bí danh của `print`.
 
 ### Chạy cả thư mục
@@ -81,9 +95,57 @@ cấu trúc thư mục và xử lý tuần tự:
 .\upscale "D:\BO ANH" 10
 .\upscale high "D:\BO ANH" 10
 .\upscale print "D:\BO ANH" 4 --width-mm 4000
+.\upscale layers "D:\BO ANH" 1
 ```
 
 Mỗi ảnh trong batch V4 dùng chung hệ số `n`, khổ rộng, bleed và ICC profile đã truyền.
+Mỗi ảnh batch V5 dùng cùng `n`, chạy tuần tự để không tranh VRAM và tạo một bundle riêng.
+
+## Lệnh V5 Smart Layers
+
+```text
+.\upscale layers <file-hoặc-thư-mục> <n>
+                  [--max-layers 4..60] [--inpaint auto|poster|lama]
+                  [--no-semantic] [--allow-huge]
+```
+
+- `n=1`: tách/chỉnh ở đúng kích thước nguồn, nhẹ nhất và không cần bộ checkpoint super-resolution V3.
+- `1<n<=20`: lấy master AI V3 native x4 đã kiểm định rồi resample một lần tới kích thước yêu cầu;
+  vì vậy máy phải có đủ ba checkpoint V3 cục bộ.
+- Mặc định tối đa 24 layer tiền cảnh; nền tổng hợp là một layer riêng, nên tổng tối đa là 25.
+  Mảnh nhỏ được nhập vào khối cha thay vì tạo hàng trăm “hột”.
+- `poster` ưu tiên nền màu/gradient/hình học; `lama` dùng LaMa cho texture ảnh; `auto` chọn bảo thủ
+  từ đặc trưng ảnh. Không chế độ nào khôi phục được pixel gốc vốn bị vật thể che.
+- `--allow-huge` cho phép vượt cảnh báo 120 MP sau khi tự kiểm tra tài nguyên; hard cap 300 MP vẫn giữ.
+
+Bundle nằm trong `OUTPUT\V5_LAYERS` và luôn gồm OpenRaster `.ora`, ZIP PNG/mask, bản xem, layer map,
+contact sheet, OCR JSON và manifest có hash/QA. PSD pixel-layer chỉ được tạo khi mỗi cạnh
+không quá 30.000 px và ước tính dữ liệu layer thô không quá 1,6 GB; V5 không tạo PSB giả.
+ORA + ZIP là bản mở chuẩn khi PSD vượt giới hạn. ZIP chỉ chứa manifest di động, OCR, các RGBA crop
+và mask; nó không đóng gói lặp lại PSD/ORA/preview. OCR chỉ hỗ trợ nhận diện/đặt tên — chữ vẫn là
+raster, không giả thành font.
+
+V5 nhận PNG/JPEG/WebP/BMP/TIFF một khung. Ảnh động và TIFF nhiều trang bị từ chối; alpha nguồn hiện
+được ghép lên nền trắng trước khi suy luận layer để đầu vào chuẩn hóa không mơ hồ.
+Profile sRGB đã chuẩn hóa được nhúng vào mọi PNG màu, PNG màu trong ORA và resource ICC của PSD;
+mask alpha `L` cố ý không gắn profile RGB. V5 mở lại để xác minh profile không bị mất khi xuất.
+
+V5 bảo đảm ảnh ghép lại được kiểm tra từ chính các layer 8-bit đã xuất. Tuy vậy, hãy mở PSD/ORA,
+tắt từng layer và kiểm tra nền ở 100% trước khi sửa file quan trọng. Canva có thể thay đổi khả năng
+nhập PSD; cần thử đúng bundle thật thay vì suy ra từ phần mở rộng.
+
+Mở PSD bằng Photoshop/Photopea; mở ORA bằng Krita/GIMP. Với Canva, thử nhập PSD trước; nếu importer
+không giữ đúng hierarchy/alpha, hãy upload từng RGBA trong `LAYERS` và đặt theo `canvas_offset` ở
+`manifest.json`. Preview chỉ để đối chiếu, không phải master chỉnh sửa. Không có tiêu chuẩn nào khôi
+phục được layer graph đã mất từ bitmap phẳng; OpenRaster 0.0.6 chỉ chuẩn hóa cách trao đổi các layer
+được V5 suy luận.
+
+Quy trình nhẹ nên dùng: chạy V5 `n=1` → sửa PSD/ORA → xuất một PNG đã ghép từ phần mềm chỉnh sửa →
+chạy `upscale high <PNG-đã-sửa> <n>` để lấy ảnh lớn, hoặc `upscale print` để tạo bộ giao in V4.
+Nếu cần chính tài liệu layer ở độ phân giải lớn ngay từ đầu, chạy V5 với `n=4`; file sẽ nặng hơn rõ rệt.
+PSD/ORA V5 là tài liệu raster RGB trung gian, không phải CMYK/PDF-X giao in và không cam kết giữ DPI
+hay khổ vật lý nguồn. Khi giao in, hãy dùng PNG đã sửa với `upscale print ... --width-mm ...` rồi
+preflight theo ICC/yêu cầu của nhà in.
 
 ## Lệnh V4 Print
 
@@ -155,11 +217,11 @@ hàng loạt.
 
 ## Phần cứng và runtime
 
-| Máy | V2 Fast | V3 High | V4 Print |
-|---|---:|---:|---:|
-| NVIDIA GTX/RTX phù hợp | Có | Có | Có, bắt buộc cho `print` |
-| AMD/Intel có Vulkan | Có thể dùng | Không | Chỉ `vector` |
-| Chỉ CPU | Chưa hỗ trợ | Không | Chỉ `vector`, có thể chậm |
+| Máy | V2 Fast | V3 High | V4 Print | V5 Layers |
+|---|---:|---:|---:|---:|
+| NVIDIA GTX/RTX phù hợp | Có | Có | Có, bắt buộc cho `print` | Có; nhanh nhất, x1 hoặc xN |
+| AMD/Intel có Vulkan | Có thể dùng | Không | Chỉ `vector` | Có bằng CPU, chậm; nên x1 |
+| Chỉ CPU | Chưa hỗ trợ | Không | Chỉ `vector`, có thể chậm | Có bằng CPU, chậm; nên x1 |
 
 V2 dùng Real-ESRGAN NCNN/Vulkan. V3 dùng PyTorch/CUDA. V4 `print` cần NVIDIA CUDA vì nó tạo/
 tái sử dụng master V3 native x4 rồi đánh giá thêm HAT tiled trên **toàn ảnh**. Deep có thể bị loại
@@ -184,6 +246,27 @@ toolchain V4 đã pin và kiểm tra SHA bằng:
 Lệnh cài tự tải G'MIC 4.0.2, resvg 0.47.0, Scribus 1.6.6 và Python package V4.
 Chế độ `print` còn cần runtime/model V3 CUDA; nếu máy không có NVIDIA thì dùng `vector`.
 
+Cài/kiểm tra V5 bằng lệnh riêng. Setup tái dùng môi trường V3 nếu đã có để tránh tốn thêm
+vài GB; máy không NVIDIA tự nhận bản PyTorch CPU:
+
+```powershell
+.\APP\engines\V5\setup_v5.ps1
+.\APP\engines\V5\setup_v5.ps1 -CheckOnly
+
+# Máy bị hạn chế cài Tesseract: bỏ OCR có chủ đích và dùng cùng cờ khi kiểm tra
+.\APP\engines\V5\setup_v5.ps1 -SkipTesseract
+.\APP\engines\V5\setup_v5.ps1 -CheckOnly -SkipTesseract
+```
+
+Setup tải snapshot SAM 2.1/Grounding DINO đã pin, checkpoint LaMa đã kiểm SHA-256 và model
+`vie.traineddata` đã pin. Nếu thiếu Tesseract 5, setup dùng WinGet cài đúng gói Windows đã khóa;
+máy bị hạn chế cài phần mềm có thể chủ động dùng `-SkipTesseract`, khi đó V5 vẫn chạy bằng SAM/DINO,
+bỏ qua vùng OCR và ghi trạng thái vào manifest. Lượt `-CheckOnly` sau đó cũng phải mang cờ
+`-SkipTesseract`. Không model hay output lớn nào được commit lên Git.
+
+Máy chỉ có CPU dùng V5 `n=1` (SAM sẽ chậm). Việc tạo master làm nét V3 mới cho `n>1` cần NVIDIA
+CUDA; cache V3 đã kiểm định có sẵn vẫn có thể tái dùng, nhưng máy CPU sạch không tự tạo cache đó.
+
 ## Cấu trúc dự án
 
 ```text
@@ -192,11 +275,13 @@ OUTPUT/V2_FAST/           PNG V2
 OUTPUT/V3_HIGH/           PNG V3
 OUTPUT/V4_PRINT/          bundle V4 Print SVG/PDF-X-4/PNG
 OUTPUT/V4_VECTOR/         bundle toàn vector cho artwork phẳng
+OUTPUT/V5_LAYERS/         bundle PSD/ORA/PNG-mask V5
 APP/
   upscale_cli.py          bộ điều phối một ảnh và cả thư mục
   engines/V2/             V2 Fast
   engines/V3/             V3 High và kiểm thử
   engines/V4/             V4 Print, export PDF/X-4 và kiểm thử
+  engines/V5/             tách layer, tái tạo nền, PSD/ORA và kiểm thử
   manifests/              báo cáo kỹ thuật cục bộ
 upscale.cmd               lệnh duy nhất người dùng cần gọi
 VERSION                   phiên bản ứng dụng
@@ -230,6 +315,17 @@ finally {
 }
 ```
 
+## Kiểm thử V5
+
+```powershell
+& .\APP\engines\V3\.venv\Scripts\python.exe -B -m unittest discover `
+  -s APP\engines\V5\tests -p "test_*.py" -v
+.\APP\engines\V5\setup_v5.ps1 -CheckOnly
+```
+
+Checklist phát hành còn phải chạy một ảnh thật, mở lại PSD, validate ORA 0.0.6, so ảnh tái ghép
+với preview và kiểm tra nền khi tắt/move từng group cha–con.
+
 ## Nguồn nền tảng
 
 - [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) và [Real-ESRGAN NCNN Vulkan](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan)
@@ -237,8 +333,10 @@ finally {
 - [G'MIC](https://gmic.eu/), [VTracer](https://github.com/visioncortex/vtracer), [resvg](https://github.com/linebender/resvg)
 - [Scribus](https://www.scribus.net/) và [pikepdf](https://github.com/pikepdf/pikepdf)
 - [ISO 15930-7 (PDF/X-4)](https://www.iso.org/standard/55843.html), [PDF Association: yêu cầu PDF/X](https://pdfa.org/technical-side-and-requirements-of-pdfx/), [GWG Sign & Display](https://gwg.org/sign-display/) và [W3C SVG 2 Embedded Content](https://www.w3.org/TR/SVG/embedded.html)
+- [SAM 2 chính thức](https://github.com/facebookresearch/sam2), [Grounding DINO chính thức](https://github.com/IDEA-Research/GroundingDINO), [Tesseract OCR](https://github.com/tesseract-ocr/tesseract), [LaMa chính thức](https://github.com/advimman/lama) và [OpenRaster](https://www.openraster.org/baseline/layer-stack-spec.html)
 
-Chi tiết phiên bản và giấy phép nằm trong `APP\engines`, `APP\engines\V4\SOURCES.md` và
+Chi tiết phiên bản và giấy phép nằm trong `APP\engines`, `APP\engines\V4\SOURCES.md`,
+`APP\engines\V5\SOURCES.md` và
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Giấy phép

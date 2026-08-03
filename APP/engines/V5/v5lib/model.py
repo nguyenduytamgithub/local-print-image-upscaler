@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+
+
+Box = tuple[int, int, int, int]
+
+
+@dataclass(slots=True)
+class MaskCandidate:
+    candidate_id: int
+    mask: np.ndarray
+    score: float
+    bbox: Box
+    area: int
+    fill_ratio: float
+    mean_rgb: tuple[float, float, float]
+    std_rgb: float
+
+
+@dataclass(slots=True)
+class TextRegion:
+    bbox: Box
+    text: str
+    confidence: float
+
+
+@dataclass(slots=True)
+class Detection:
+    bbox: Box
+    label: str
+    score: float
+
+
+@dataclass(slots=True)
+class LayerSpec:
+    layer_id: str
+    name: str
+    category: str
+    mask: np.ndarray
+    score: float
+    source_ids: list[int] = field(default_factory=list)
+    label: str | None = None
+    text: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def bbox(self) -> Box:
+        ys, xs = np.where(self.mask)
+        if not len(xs):
+            return 0, 0, 0, 0
+        return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+    @property
+    def area(self) -> int:
+        return int(self.mask.sum())

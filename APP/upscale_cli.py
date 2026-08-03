@@ -1,4 +1,4 @@
-"""Single public command for the local V2, V3 and print-master V4 engines."""
+"""Single public command for the local V2, V3, V4 and smart-layer V5 engines."""
 
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ V4_SOFT_SOURCE_MEGAPIXELS = 12.0
 V4_HARD_SOURCE_MEGAPIXELS = 64.0
 V4_HARD_NATIVE_MEGAPIXELS = HARD_RASTER_MEGAPIXELS
 V4_HARD_OUTPUT_MEGAPIXELS = HARD_RASTER_MEGAPIXELS
+V5_SOFT_OUTPUT_MEGAPIXELS = 120.0
+V5_HARD_OUTPUT_MEGAPIXELS = 300.0
 MIN_SOURCE_DPI = 10.0
 MAX_SOURCE_DPI = 2_400.0
 V3_CACHE_CONFIG_VERSION = 2
@@ -46,10 +48,13 @@ OUTPUT_DIR = ROOT_DIR / "OUTPUT"
 WORK_DIR = APP_DIR / "work"
 PYTHON = APP_DIR / "engines" / "V3" / ".venv" / "Scripts" / "python.exe"
 PYTHON_V4 = APP_DIR / "engines" / "V4" / ".venv" / "Scripts" / "python.exe"
+PYTHON_V5_LOCAL = APP_DIR / "engines" / "V5" / ".venv" / "Scripts" / "python.exe"
+PYTHON_V5 = PYTHON_V5_LOCAL if PYTHON_V5_LOCAL.is_file() else PYTHON
 V2_ENGINE = APP_DIR / "engines" / "V2" / "upsize_ai_v2.py"
 V3_ENGINE = APP_DIR / "engines" / "V3" / "upsize_ai_v3_master.py"
 V4_ENGINE = APP_DIR / "engines" / "V4" / "upsize_vector_v4.py"
 V4_DEEP_ENGINE = APP_DIR / "engines" / "V4" / "deep_raster_v4.py"
+V5_ENGINE = APP_DIR / "engines" / "V5" / "layer_engine_v5.py"
 V4_DEEP_MODEL = APP_DIR / "engines" / "V3" / "models" / "Real_HAT_GAN_sharper.pth"
 V4_DEEP_CONFIG_VERSION = 1
 V3_MODEL_FILES = (
@@ -82,6 +87,23 @@ class UserError(RuntimeError):
     """Expected command/input error with a short user-facing message."""
 
 
+@lru_cache(maxsize=4)
+def python_runtime_has_cuda(python_path: str) -> bool:
+    try:
+        completed = subprocess.run(
+            [
+                python_path,
+                "-c",
+                "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)",
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
 def configure_console() -> None:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -110,6 +132,10 @@ UPSCALE ẢNH GPU
 5. Dùng V4 toàn vector cho logo/đồ họa phẳng (có thể posterize ảnh chụp):
    .\\upscale vector <ten-anh> <n> [--width-mm <khổ-rộng-mm>]
 
+6. Dùng V5 tách ảnh phẳng thành các layer raster thông minh:
+   .\\upscale layers <file-hoặc-thư-mục> <n> [--max-layers 4..60]
+                   [--inpaint auto|poster|lama] [--no-semantic] [--allow-huge]
+
 Đường dẫn là thư mục thì chương trình chạy tất cả ảnh trong thư mục và
 các thư mục con với cùng một hệ số n.
 
@@ -121,22 +147,32 @@ Ví dụ:
    .\\upscale high "D:\\BO ANH" 10
    .\\upscale print poster.png 10 --width-mm 3000
    .\\upscale print "D:\\BO ANH" 4 --width-mm 4000
+   .\\upscale layers poster.png 1
+   .\\upscale layers "D:\\BO ANH" 4
 
 Kết quả V2: {OUTPUT_DIR / 'V2_FAST'}
 Kết quả V3: {OUTPUT_DIR / 'V3_HIGH'}
 Kết quả V4 Print : {OUTPUT_DIR / 'V4_PRINT'}
 Kết quả V4 Vector: {OUTPUT_DIR / 'V4_VECTOR'}
+Kết quả V5 Layer : {OUTPUT_DIR / 'V5_LAYERS'}
 
 Mỗi bundle V4 có 3 file thật:
    *_EDITABLE.svg       raster được QA + path vector opacity 0 để chỉnh sửa
    *_PRINT_PDFX4.pdf    PDF/X-4 có ICC, lấy hình in từ raster được QA
    *_PREVIEW_xN.png     bản PNG cùng raster để xem nhanh
 
+Mỗi bundle V5 luôn có OpenRaster (.ora), ZIP layer PNG/mask, bản xem và manifest.
+PSD chỉ có khi canvas không quá 30.000 px/cạnh và dự toán layer thô không quá 1,6 GB.
+PSD/ORA là layer raster RGB thật; OCR chỉ đặt tên hỗ trợ, không giả làm font chỉnh sửa.
+Phần nền vốn bị vật thể che được tái tạo hợp lý và được ghi rõ là nền suy đoán.
+V5 là tài liệu trung gian để sửa, không phải PDF/X hoặc CMYK giao in và không cam kết giữ DPI/khổ vật lý.
+
 Nếu khổ thành phẩm cộng bleed vượt 5.000 mm, PDF V4 tự chọn tỷ lệ 1:d nhỏ nhất và ghi rõ
 trong báo cáo kỹ thuật. Hãy thay ICC mặc định bằng profile của nhà in khi họ cung cấp.
 
-n là hệ số chiều rộng và chiều cao, từ 2 đến 20.
-Khuyên dùng n=4 hoặc n=10. Cùng một lệnh chạy lại sẽ thay kết quả cũ
+n là hệ số chiều rộng và chiều cao, từ 2 đến 20; riêng V5 nhận cả n=1 để chỉnh nhẹ.
+V2/V3/V4 thường dùng n=4 hoặc n=10; V5 nên dùng n=1 để sửa nhẹ hoặc n=4 khi cần canvas layer lớn.
+Cùng một lệnh chạy lại sẽ thay kết quả cũ
 một cách an toàn sau khi file mới đã render và kiểm tra xong.
 """.strip()
     )
@@ -153,14 +189,39 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
         "width_mm": None,
         "bleed_mm": 0.0,
         "profile_name": "ISO Coated v2 300% (basICColor)",
+        "max_layers": 24,
+        "inpaint": "auto",
+        "semantic": True,
     }
     v4_specific_option = False
+    v5_specific_option = False
     index = 0
     while index < len(argv):
         value = argv[index]
         lowered = value.lower()
         if lowered == "--allow-huge":
             allow_huge = True
+        elif lowered == "--no-semantic":
+            v4_options["semantic"] = False
+            v5_specific_option = True
+        elif lowered in {"--max-layers", "--inpaint"}:
+            if index + 1 >= len(argv):
+                raise UserError(f"Thiếu giá trị sau {value}.")
+            raw = argv[index + 1]
+            if lowered == "--max-layers":
+                try:
+                    number = int(raw)
+                except ValueError as exc:
+                    raise UserError(f"Giá trị không hợp lệ cho {value}: {raw}") from exc
+                if not 4 <= number <= 60:
+                    raise UserError("--max-layers phải từ 4 đến 60.")
+                v4_options["max_layers"] = number
+            else:
+                if raw.lower() not in {"auto", "poster", "lama"}:
+                    raise UserError("--inpaint chỉ nhận auto, poster hoặc lama.")
+                v4_options["inpaint"] = raw.lower()
+            v5_specific_option = True
+            index += 1
         elif lowered in {"--width-mm", "--bleed-mm", "--profile-name"}:
             if index + 1 >= len(argv):
                 raise UserError(f"Thiếu giá trị sau {value}.")
@@ -193,11 +254,16 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
     elif positional and positional[0].lower() == "vector":
         mode = "V4_VECTOR"
         positional.pop(0)
+    elif positional and positional[0].lower() in {"layers", "layer", "v5"}:
+        mode = "V5_LAYERS"
+        positional.pop(0)
     elif positional and positional[0].lower() in {"fast", "v2"}:
         positional.pop(0)
 
     if mode not in {"V4_PRINT", "V4_VECTOR"} and v4_specific_option:
         raise UserError("--width-mm, --bleed-mm và --profile-name chỉ dùng với chế độ print/V4.")
+    if mode != "V5_LAYERS" and v5_specific_option:
+        raise UserError("--max-layers, --inpaint và --no-semantic chỉ dùng với chế độ layers/V5.")
 
     if len(positional) != 2:
         raise UserError("Sai cú pháp. Gõ .\\upscale để xem ví dụ.")
@@ -206,9 +272,10 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
         scale = float(scale_token.replace(",", "."))
     except ValueError as exc:
         raise UserError(f"Hệ số không hợp lệ: {scale_token}") from exc
-    if not (MIN_SCALE <= scale <= MAX_SCALE):
+    minimum_scale = 1.0 if mode == "V5_LAYERS" else MIN_SCALE
+    if not (minimum_scale <= scale <= MAX_SCALE):
         raise UserError(
-            f"Hệ số phải từ x{MIN_SCALE:g} đến x{MAX_SCALE:g}. "
+            f"Hệ số phải từ x{minimum_scale:g} đến x{MAX_SCALE:g}. "
             "x100 tạo lượng pixel quá lớn và không làm ảnh có thêm chi tiết thật."
         )
     width_mm = v4_options["width_mm"]
@@ -563,6 +630,71 @@ def validate_v4_resource_plan(
     return estimates
 
 
+def validate_v5_resource_plan(
+    source_size: tuple[int, int],
+    final_size: tuple[int, int],
+    *,
+    allow_huge: bool,
+    max_layers: int = 24,
+) -> dict[str, float]:
+    if not 4 <= max_layers <= 60:
+        raise UserError("Ngân sách layer V5 phải từ 4 đến 60.")
+    source_pixels = source_size[0] * source_size[1]
+    output_pixels = final_size[0] * final_size[1]
+    source_mp = source_pixels / 1_000_000
+    output_mp = output_pixels / 1_000_000
+    if source_mp > V4_HARD_SOURCE_MEGAPIXELS or output_mp > V5_HARD_OUTPUT_MEGAPIXELS:
+        raise UserError(
+            "Kế hoạch V5 vượt giới hạn layer an toàn cứng "
+            f"({source_mp:.1f} MP nguồn, {output_mp:.1f} MP canvas; "
+            f"tối đa {V5_HARD_OUTPUT_MEGAPIXELS:g} MP đầu ra)."
+        )
+    # Worst-case foreground layers may each cover most of the canvas. Include
+    # cropped RGBA+mask residency, model/SAM working memory, the open ORA, the
+    # portable PNG/mask ZIP and atomic replacement headroom. This estimate is
+    # intentionally conservative; a post-render gate uses the actual crop area.
+    estimated_peak_ram = (
+        source_pixels * 420
+        + output_pixels * (32 + 5 * max_layers)
+        + 3 * 1024**3
+    )
+    estimated_disk = (
+        output_pixels * (12 + 14 * max_layers)
+        + 2 * 1024**3
+    )
+    minimum_disk_before_segmentation = output_pixels * 20 + 2 * 1024**3
+    if output_mp > V5_SOFT_OUTPUT_MEGAPIXELS and not allow_huge:
+        raise UserError(
+            f"Bundle layer V5 sẽ có canvas {final_size[0]}x{final_size[1]} ({output_mp:.1f} MP) "
+            "và có thể rất nặng. Nên tách/chỉnh ở x1 hoặc x4; nếu vẫn cần, thêm --allow-huge."
+        )
+    free_disk = shutil.disk_usage(APP_DIR).free
+    # Do not reject a sparse poster from the impossible all-layers-full-canvas
+    # disk upper bound. The engine measures actual crop support after
+    # segmentation and hard-fails before export if the real ORA/ZIP plan will
+    # not fit. This lower bound only protects the unavoidable canvas/work files.
+    if minimum_disk_before_segmentation > free_disk * 0.8:
+        raise UserError(
+            "Không đủ dung lượng tối thiểu cho canvas V5 trước khi tách lớp: "
+            f"cần {minimum_disk_before_segmentation / 1024**3:.2f} GiB, "
+            f"hiện trống {free_disk / 1024**3:.2f} GiB."
+        )
+    free_ram = available_physical_memory()
+    if free_ram is not None and estimated_peak_ram > free_ram * 0.85:
+        raise UserError(
+            f"Không đủ RAM khả dụng cho V5: ước tính {estimated_peak_ram / 1024**3:.2f} GiB "
+            f"với tối đa {max_layers} layer tiền cảnh, hiện khả dụng {free_ram / 1024**3:.2f} GiB. "
+            "Hãy giảm n hoặc --max-layers."
+        )
+    return {
+        "source_megapixels": round(source_mp, 3),
+        "output_megapixels": round(output_mp, 3),
+        "estimated_peak_ram_gib": round(estimated_peak_ram / 1024**3, 2),
+        "estimated_working_disk_gib": round(estimated_disk / 1024**3, 2),
+        "minimum_working_disk_gib": round(minimum_disk_before_segmentation / 1024**3, 2),
+    }
+
+
 def find_cached_v3_native(source_sha256: str, normalized_sha256: str) -> Path | None:
     signature = current_v3_cache_signature()
     cache_dir = APP_DIR / "masters" / "V4_AI_BASE"
@@ -677,6 +809,99 @@ def find_cached_v4_deep(
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             continue
     return None
+
+
+def prepare_v5_ai_master(
+    source: Path,
+    staged_input: Path,
+    job_dir: Path,
+    scale: float,
+) -> tuple[Path, dict[str, object]]:
+    """Reuse the audited V3 native x4 master, then resize once to V5's canvas."""
+
+    if abs(scale - 1.0) < 1e-9:
+        return staged_input, {
+            "policy": "source-resolution layer editing",
+            "native_scale": 1,
+            "reused_v3_cache": False,
+        }
+    missing_v3 = [path for path in (*V3_ENGINE_FILES, *V3_MODEL_FILES) if not path.is_file()]
+    if missing_v3:
+        raise UserError(
+            "V5 x1 vẫn dùng được, nhưng n>1 cần bộ model V3 để làm nét các layer. "
+            f"Đang thiếu: {missing_v3[0]}"
+        )
+    source_sha = sha256_file(source)
+    normalized_sha = canonical_pixel_sha256(staged_input)
+    native = find_cached_v3_native(source_sha, normalized_sha)
+    reused = native is not None
+    if native is None:
+        if not python_runtime_has_cuda(str(PYTHON_V5)):
+            raise UserError(
+                "V5 n>1 cần NVIDIA CUDA để tạo master V3 lần đầu trên máy này. "
+                "Máy CPU vẫn tách layer bằng n=1; hoặc cài runtime CUDA/checkpoint V3 rồi chạy lại."
+            )
+        generated = job_dir / "v5_v3_native_x4.png"
+        print("  Master V5: chưa có cache; đang chạy V3 GPU native x4 một lần...", flush=True)
+        subprocess.run(
+            [
+                str(PYTHON_V5),
+                "-B",
+                str(V3_ENGINE),
+                str(staged_input),
+                "4",
+                str(generated),
+                "--tile",
+                "512",
+                "--overlap",
+                "128",
+                "--force",
+            ],
+            check=True,
+            cwd=ROOT_DIR,
+        )
+        cache_target = APP_DIR / "masters" / "V4_AI_BASE" / f"{normalized_sha}_NATIVE_x4.png"
+        atomic_install(generated, cache_target)
+        with Image.open(cache_target) as native_image:
+            native_image.load()
+            native_size = list(native_image.size)
+        write_json_atomic(
+            {
+                "pipeline": "V4_V3_NATIVE_CACHE",
+                "cache_version": V3_CACHE_CONFIG_VERSION,
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "source": str(source),
+                "source_sha256": source_sha,
+                "normalized_stage_sha256": normalized_sha,
+                "canonical_pixel_sha256": normalized_sha,
+                "cache_key_type": "canonical_srgb_pixels_v1",
+                "v3_cache_signature": current_v3_cache_signature(),
+                "native_sha256": sha256_file(cache_target),
+                "native_size": native_size,
+            },
+            cache_target.with_suffix(cache_target.suffix + ".json"),
+        )
+        native = cache_target
+    else:
+        print(f"  Master V5: tái sử dụng V3 native x4 đã kiểm định: {native}", flush=True)
+
+    final_size = tuple(int(round(value * scale)) for value in inspect_image(staged_input)[0])
+    if abs(scale - 4.0) < 1e-9:
+        master = native
+    else:
+        master = job_dir / f"v5_ai_master_x{scale_tag(scale)}.png"
+        with Image.open(native) as image:
+            image.load()
+            resized = image.convert("RGB").resize(final_size, Image.Resampling.LANCZOS)
+            resized.save(master, format="PNG", compress_level=3, icc_profile=srgb_profile_bytes())
+    return master, {
+        "policy": "V3 fused neural native x4; one Lanczos resize only when requested scale differs from x4",
+        "native_scale": 4,
+        "native_path": str(native),
+        "native_sha256": sha256_file(native),
+        "reused_v3_cache": reused,
+        "final_master_sha256": sha256_file(master),
+    }
 
 
 def prepare_v4_deep_base(
@@ -1109,6 +1334,133 @@ def run_v4_job(
     return target_dir
 
 
+def run_v5_job(
+    source: Path,
+    scale: float,
+    allow_huge: bool,
+    options: dict[str, object],
+    *,
+    output_subdir: Path | None = None,
+    output_stem: str | None = None,
+    batch_root: Path | None = None,
+) -> Path:
+    if not PYTHON_V5.is_file():
+        raise UserError(
+            "Thiếu môi trường V5. Hãy chạy APP\\engines\\V5\\setup_v5.ps1 một lần."
+        )
+    if not V5_ENGINE.is_file():
+        raise UserError(f"Thiếu engine V5: {V5_ENGINE}")
+    source_size, source_mode, icc_profile = inspect_image(source)
+    final_size = tuple(int(round(value * scale)) for value in source_size)
+    max_layers = int(options.get("max_layers", 24))
+    resource_plan = validate_v5_resource_plan(
+        source_size,
+        final_size,
+        allow_huge=allow_huge,
+        max_layers=max_layers,
+    )
+    relative_dir = output_subdir or Path()
+    result_stem = output_stem or source.stem
+    tag = scale_tag(scale)
+    target_dir = OUTPUT_DIR / "V5_LAYERS" / relative_dir / f"{result_stem}_V5_LAYERS_x{tag}"
+    report_path = (
+        APP_DIR
+        / "manifests"
+        / "V5_LAYERS"
+        / relative_dir
+        / f"{result_stem}_V5_LAYERS_x{tag}.json"
+    )
+
+    print("\nTHÔNG TIN LỆNH")
+    print("  Chế độ : V5 SMART LAYERS (SAM 2.1 + semantic grouping + clean background)")
+    print(f"  Input  : {source}")
+    print(f"  Nguồn  : {source_size[0]}x{source_size[1]} px, {source_mode}")
+    print(f"  Canvas : {final_size[0]}x{final_size[1]} px ({resource_plan['output_megapixels']:.1f} MP)")
+    print(f"  Layer tiền cảnh tối đa: {max_layers} (+ 1 nền)")
+    print(
+        "  Tài nguyên ước tính bảo thủ: "
+        f"{resource_plan['estimated_peak_ram_gib']:.2f} GiB RAM, "
+        f"{resource_plan['estimated_working_disk_gib']:.2f} GiB ổ tạm"
+    )
+    print(f"  Output : {target_dir}\n", flush=True)
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_bundle = target_dir.parent / f".{target_dir.name}.new-{uuid.uuid4().hex}"
+    started = time.perf_counter()
+    try:
+        with tempfile.TemporaryDirectory(prefix="job_v5_", dir=WORK_DIR) as temporary_raw:
+            job_dir = Path(temporary_raw)
+            staged_input = stage_input(source, job_dir, icc_profile)
+            normalized_sha = canonical_pixel_sha256(staged_input)
+            master, master_info = prepare_v5_ai_master(source, staged_input, job_dir, scale)
+            command = [
+                str(PYTHON_V5),
+                "-B",
+                str(V5_ENGINE),
+                str(staged_input),
+                f"{scale:g}",
+                str(staging_bundle),
+                "--master",
+                str(master),
+                "--name",
+                result_stem,
+                "--max-layers",
+                str(max_layers),
+                "--inpaint",
+                str(options.get("inpaint", "auto")),
+                "--app-version",
+                APP_VERSION,
+            ]
+            if not bool(options.get("semantic", True)):
+                command.append("--no-semantic")
+            subprocess.run(command, check=True, cwd=ROOT_DIR)
+
+            engine_manifest_path = staging_bundle / "manifest.json"
+            if not engine_manifest_path.is_file():
+                raise RuntimeError("V5 không tạo manifest kiểm định.")
+            metadata = json.loads(engine_manifest_path.read_text(encoding="utf-8"))
+            if metadata.get("pipeline") != "V5_SMART_EDITABLE_LAYERS":
+                raise RuntimeError("Manifest V5 sai pipeline.")
+            if metadata.get("final_size") != list(final_size):
+                raise RuntimeError("Manifest V5 sai kích thước canvas.")
+            if int(metadata.get("grouping", {}).get("selected_layer_count", 0)) < 1:
+                raise RuntimeError("V5 không có layer foreground hợp lệ.")
+            required_patterns = ("*_MASTER.ora", "*_LAYERS.zip", "*_PREVIEW.png")
+            for pattern in required_patterns:
+                if not any(staging_bundle.glob(pattern)):
+                    raise RuntimeError(f"V5 thiếu đầu ra bắt buộc: {pattern}")
+            metadata.update(
+                {
+                    "launcher": "Local Print Image Upscaler unified command",
+                    "launcher_app_version": APP_VERSION,
+                    "original_source": str(source),
+                    "original_source_sha256": sha256_file(source),
+                    "normalized_stage_sha256": normalized_sha,
+                    "launcher_master": master_info,
+                    "resource_plan": resource_plan,
+                    "final_bundle": str(target_dir),
+                    "launcher_total_seconds": round(time.perf_counter() - started, 3),
+                }
+            )
+            if batch_root is not None:
+                metadata["batch_root"] = str(batch_root)
+                metadata["batch_relative_source"] = str(source.relative_to(batch_root))
+            write_json_atomic(metadata, engine_manifest_path)
+            atomic_install_directory(staging_bundle, target_dir)
+            write_json_atomic(metadata, report_path)
+    finally:
+        if staging_bundle.exists():
+            shutil.rmtree(staging_bundle)
+
+    total_seconds = time.perf_counter() - started
+    print("\nHOÀN TẤT V5")
+    print(f"  Mở bundle tại : {target_dir}")
+    print(f"  PSD chỉnh sửa : {next(target_dir.glob('*_EDITABLE.psd'), 'đã bỏ qua do giới hạn PSD')}")
+    print(f"  ORA mở chuẩn  : {next(target_dir.glob('*_MASTER.ora'))}")
+    print(f"  Thời gian     : {total_seconds:.1f} giây")
+    return target_dir
+
+
 def run_job(
     mode: str,
     source: Path,
@@ -1120,6 +1472,16 @@ def run_job(
     output_stem: str | None = None,
     batch_root: Path | None = None,
 ) -> Path:
+    if mode == "V5_LAYERS":
+        return run_v5_job(
+            source,
+            scale,
+            allow_huge,
+            v4_options or {},
+            output_subdir=output_subdir,
+            output_stem=output_stem,
+            batch_root=batch_root,
+        )
     if mode in {"V4_PRINT", "V4_VECTOR"}:
         return run_v4_job(
             mode,
@@ -1242,7 +1604,10 @@ def run_batch(
     allow_huge: bool,
     v4_options: dict[str, object],
 ) -> int:
-    if mode in {"V4_PRINT", "V4_VECTOR"}:
+    if mode == "V5_LAYERS":
+        if not PYTHON_V5.is_file() or not V5_ENGINE.is_file():
+            raise UserError("Thiếu Python CUDA hoặc engine V5; batch chưa thể chạy.")
+    elif mode in {"V4_PRINT", "V4_VECTOR"}:
         if not PYTHON_V4.is_file() or not V4_ENGINE.is_file():
             raise UserError("Thiếu Python hoặc engine V4 trong APP; batch chưa thể chạy.")
     elif not PYTHON.is_file() or not V2_ENGINE.is_file() or not V3_ENGINE.is_file():

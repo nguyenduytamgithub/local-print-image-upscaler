@@ -3,6 +3,34 @@
 Các thay đổi đáng chú ý của Local Print Image Upscaler được ghi tại đây. Dự án dùng
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08-04
+
+### Added
+
+- Thêm `upscale layers` (V5 Smart Layers) để suy luận một số lượng hữu hạn layer raster hữu ích từ
+  PNG/JPEG/TIFF/WebP/BMP phẳng; hỗ trợ một ảnh hoặc batch cả thư mục, cùng hệ số `n=1..20`.
+- Phân luồng poster/đồ họa và ảnh tự nhiên: SAM 2.1 sinh đề xuất mask; poster được gộp theo panel,
+  hàng, quan hệ cha–con và hình học, còn ảnh nhiều texture dùng chiến lược nhóm bảo thủ riêng.
+- Thêm Grounding DINO làm nhãn gợi ý và Tesseract với model `tessdata_best` tiếng Việt đã pin để lấy
+  vùng/dòng OCR. Các tín hiệu này không biến chữ bitmap thành font có thể gõ sửa.
+- Tạo nền dưới vật thể bằng bộ khôi phục hình học/màu/gradient dành cho poster hoặc LaMa dành cho
+  texture. Manifest luôn đánh dấu đây là nền tổng hợp vì pixel vốn bị che không tồn tại trong ảnh phẳng.
+- Xuất bundle thật gồm PSD pixel-layer có group, OpenRaster 0.0.6, ZIP PNG/mask di động, preview,
+  layer map, contact sheet, OCR JSON và manifest có hash/QA; không đổi đuôi giả và không ghi PSB giả.
+- Kiểm tra ảnh tái ghép từ chính asset RGBA 8-bit đã xuất, mở lại PSD, kiểm tra thứ tự/hierarchy/offset,
+  và validate cấu trúc cùng composite của ORA trước khi công bố bundle.
+- Nhúng cùng profile sRGB đã chuẩn hóa vào mọi PNG màu, các PNG màu trong ORA và resource ICC của
+  PSD; mask alpha `L` cố ý không mang profile RGB. Runtime mở lại và xác minh profile byte-for-byte.
+- Thêm `setup_v5.ps1`, lock dependency, revision model và SHA-256 cho LaMa cùng dữ liệu OCR tiếng Việt;
+  hỗ trợ CUDA cục bộ hoặc CPU chậm hơn, không tải ảnh người dùng lên cloud.
+
+### Changed
+
+- V2 Fast, V3 High và hai chế độ V4 được giữ nguyên; V5 có thư mục input/output, runtime, model và
+  kiểm thử riêng nhưng vẫn dùng chung một lệnh `upscale`.
+- Phiên bản ứng dụng tăng lên `0.3.0`; tài liệu công khai phân biệt rõ raster layer suy luận với layer
+  gốc, PSD adapter với bản mở ORA/ZIP, và chi tiết nhìn thấy với phần nền vô hình chỉ có thể tổng hợp.
+
 ## [0.2.0] - 2026-08-03
 
 ### Added

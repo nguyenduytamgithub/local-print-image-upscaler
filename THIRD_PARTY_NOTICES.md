@@ -20,11 +20,27 @@ checkpoints. Their copyrights and licenses remain with their respective authors.
 | Pillow | <https://python-pillow.org/> | HPND |
 | NumPy | <https://numpy.org/> | BSD-3-Clause |
 | uv | <https://github.com/astral-sh/uv> | MIT OR Apache-2.0 |
+| SAM 2.1 | <https://github.com/facebookresearch/sam2> | Apache-2.0 |
+| Grounding DINO | <https://github.com/IDEA-Research/GroundingDINO> | Apache-2.0 |
+| LaMa | <https://github.com/advimman/lama> | Apache-2.0 |
+| simple-lama-inpainting adapter | <https://github.com/enesmsahin/simple-lama-inpainting> | Apache-2.0 |
+| Tesseract OCR | <https://github.com/tesseract-ocr/tesseract> | Apache-2.0 |
+| UB Mannheim Windows build of Tesseract | <https://tesseract-ocr.github.io/tessdoc/Installation.html> | Tesseract distribution; component notices remain applicable |
+| Tesseract `tessdata_best` Vietnamese model | <https://github.com/tesseract-ocr/tessdata_best> | Apache-2.0 |
+| Transformers | <https://github.com/huggingface/transformers> | Apache-2.0 |
+| psd-tools | <https://github.com/psd-tools/psd-tools> | MIT |
+| OpenRaster | <https://www.openraster.org/> | Open specification; implementations retain their own licenses |
 
-Full license texts retained for the local engines are under:
+Retained license texts and source/license records for the local engines are under:
 
 - `APP/engines/V2/THIRD_PARTY_LICENSES/`
 - `APP/engines/V3/THIRD_PARTY_LICENSES/`
+- `APP/engines/V5/SOURCES.md` records pinned SAM 2.1/Grounding DINO revisions, LaMa and
+  Vietnamese OCR hashes, plus the PSD/OpenRaster format policy.
+
+The complete Apache-2.0 text used by the Apache-licensed V5 sources is retained at
+`APP/engines/V3/THIRD_PARTY_LICENSES/HAT_APACHE-2.0.txt`; V5 source-specific attribution is
+recorded in `APP/engines/V5/SOURCES.md`.
 
 The V4 executable runtimes are machine-local and excluded from Git. Their pinned versions,
 official project links and runtime hashes are recorded in `APP/engines/V4/SOURCES.md` and in

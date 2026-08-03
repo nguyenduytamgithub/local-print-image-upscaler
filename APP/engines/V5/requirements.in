@@ -1,0 +1,12 @@
+# Windows x64 and CPython 3.11-3.13 are the supported runtime envelope.
+# PyTorch/torchvision are installed by setup_v5.ps1 from the official CPU or
+# CUDA cu126 index after the common lock is applied.
+numpy==2.4.4
+Pillow==12.3.0
+opencv-python-headless==5.0.0.93
+scipy==1.17.1
+scikit-image==0.26.0
+transformers==5.14.1
+huggingface_hub==1.26.0
+psd-tools==1.17.4
+spandrel==0.4.2
