@@ -1,10 +1,12 @@
-"""Single public command for the local V2 FAST and V3 HIGH upscalers."""
+"""Single public command for the local V2, V3 and print-master V4 engines."""
 
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import hashlib
 import json
+import math
 import msvcrt
 import os
 import re
@@ -13,19 +15,29 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
+from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
 
 
 Image.MAX_IMAGE_PIXELS = 500_000_000
 MIN_SCALE = 2.0
 MAX_SCALE = 20.0
 MAX_MEGAPIXELS = 500.0
+HARD_RASTER_MEGAPIXELS = 750.0
+V4_SOFT_SOURCE_MEGAPIXELS = 12.0
+V4_HARD_SOURCE_MEGAPIXELS = 64.0
+V4_HARD_NATIVE_MEGAPIXELS = HARD_RASTER_MEGAPIXELS
+V4_HARD_OUTPUT_MEGAPIXELS = HARD_RASTER_MEGAPIXELS
+MIN_SOURCE_DPI = 10.0
+MAX_SOURCE_DPI = 2_400.0
+V3_CACHE_CONFIG_VERSION = 2
 SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
-DIRECT_ENGINE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
@@ -33,8 +45,25 @@ INPUT_DIR = ROOT_DIR / "INPUT"
 OUTPUT_DIR = ROOT_DIR / "OUTPUT"
 WORK_DIR = APP_DIR / "work"
 PYTHON = APP_DIR / "engines" / "V3" / ".venv" / "Scripts" / "python.exe"
+PYTHON_V4 = APP_DIR / "engines" / "V4" / ".venv" / "Scripts" / "python.exe"
 V2_ENGINE = APP_DIR / "engines" / "V2" / "upsize_ai_v2.py"
 V3_ENGINE = APP_DIR / "engines" / "V3" / "upsize_ai_v3_master.py"
+V4_ENGINE = APP_DIR / "engines" / "V4" / "upsize_vector_v4.py"
+V4_DEEP_ENGINE = APP_DIR / "engines" / "V4" / "deep_raster_v4.py"
+V4_DEEP_MODEL = APP_DIR / "engines" / "V3" / "models" / "Real_HAT_GAN_sharper.pth"
+V4_DEEP_CONFIG_VERSION = 1
+V3_MODEL_FILES = (
+    APP_DIR / "engines" / "V3" / "models" / "Swin2SR_RealworldSR_X4_64_BSRGAN_PSNR.pth",
+    APP_DIR / "engines" / "V3" / "models" / "Real_HAT_GAN_sharper.pth",
+    APP_DIR / "engines" / "V3" / "models" / "RealESRGAN_x4plus.pth",
+)
+V3_ENGINE_FILES = (
+    V3_ENGINE,
+    APP_DIR / "engines" / "V3" / "upsize_ai_v3.py",
+    APP_DIR / "engines" / "V3" / "src" / "upscale_engine.py",
+    APP_DIR / "engines" / "V3" / "src" / "pyramid_fusion.py",
+    APP_DIR / "engines" / "V3" / "src" / "blend_outputs.py",
+)
 VERSION_FILE = ROOT_DIR / "VERSION"
 
 
@@ -75,6 +104,12 @@ UPSCALE ẢNH GPU
 3. Dùng V3 chất lượng cao:
    .\\upscale high <ten-anh> <n>
 
+4. Dùng V4 Print: guarded-USM/Deep ablation có gate native-x4 + PDF/X-4:
+   .\\upscale print <ten-anh> <n> [--width-mm <khổ-rộng-mm>]
+
+5. Dùng V4 toàn vector cho logo/đồ họa phẳng (có thể posterize ảnh chụp):
+   .\\upscale vector <ten-anh> <n> [--width-mm <khổ-rộng-mm>]
+
 Đường dẫn là thư mục thì chương trình chạy tất cả ảnh trong thư mục và
 các thư mục con với cùng một hệ số n.
 
@@ -84,9 +119,21 @@ Ví dụ:
    .\\upscale high "bang quang cao.jpg" 10
    .\\upscale "D:\\BO ANH" 10
    .\\upscale high "D:\\BO ANH" 10
+   .\\upscale print poster.png 10 --width-mm 3000
+   .\\upscale print "D:\\BO ANH" 4 --width-mm 4000
 
 Kết quả V2: {OUTPUT_DIR / 'V2_FAST'}
 Kết quả V3: {OUTPUT_DIR / 'V3_HIGH'}
+Kết quả V4 Print : {OUTPUT_DIR / 'V4_PRINT'}
+Kết quả V4 Vector: {OUTPUT_DIR / 'V4_VECTOR'}
+
+Mỗi bundle V4 có 3 file thật:
+   *_EDITABLE.svg       raster được QA + path vector opacity 0 để chỉnh sửa
+   *_PRINT_PDFX4.pdf    PDF/X-4 có ICC, lấy hình in từ raster được QA
+   *_PREVIEW_xN.png     bản PNG cùng raster để xem nhanh
+
+Nếu khổ thành phẩm cộng bleed vượt 5.000 mm, PDF V4 tự chọn tỷ lệ 1:d nhỏ nhất và ghi rõ
+trong báo cáo kỹ thuật. Hãy thay ICC mặc định bằng profile của nhà in khi họ cung cấp.
 
 n là hệ số chiều rộng và chiều cao, từ 2 đến 20.
 Khuyên dùng n=4 hoặc n=10. Cùng một lệnh chạy lại sẽ thay kết quả cũ
@@ -95,28 +142,62 @@ một cách an toàn sau khi file mới đã render và kiểm tra xong.
     )
 
 
-def parse_command(argv: list[str]) -> tuple[str, str, float, bool]:
+def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, object]]:
     if not argv or any(value.lower() in {"help", "-h", "--help", "/?"} for value in argv):
         print_help()
         raise SystemExit(0)
 
     allow_huge = False
     positional: list[str] = []
-    for value in argv:
+    v4_options: dict[str, object] = {
+        "width_mm": None,
+        "bleed_mm": 0.0,
+        "profile_name": "ISO Coated v2 300% (basICColor)",
+    }
+    v4_specific_option = False
+    index = 0
+    while index < len(argv):
+        value = argv[index]
         lowered = value.lower()
         if lowered == "--allow-huge":
             allow_huge = True
+        elif lowered in {"--width-mm", "--bleed-mm", "--profile-name"}:
+            if index + 1 >= len(argv):
+                raise UserError(f"Thiếu giá trị sau {value}.")
+            raw = argv[index + 1]
+            if lowered == "--profile-name":
+                if not raw.strip():
+                    raise UserError("Tên ICC profile không được để trống.")
+                v4_options["profile_name"] = raw.strip()
+            else:
+                try:
+                    number = float(raw.replace(",", "."))
+                except ValueError as exc:
+                    raise UserError(f"Giá trị không hợp lệ cho {value}: {raw}") from exc
+                v4_options["width_mm" if lowered == "--width-mm" else "bleed_mm"] = number
+            v4_specific_option = True
+            index += 1
         elif value.startswith("--"):
             raise UserError(f"Tùy chọn không hỗ trợ: {value}")
         else:
             positional.append(value)
+        index += 1
 
     mode = "V2_FAST"
     if positional and positional[0].lower() in {"high", "v3"}:
         mode = "V3_HIGH"
         positional.pop(0)
+    elif positional and positional[0].lower() in {"print", "v4"}:
+        mode = "V4_PRINT"
+        positional.pop(0)
+    elif positional and positional[0].lower() == "vector":
+        mode = "V4_VECTOR"
+        positional.pop(0)
     elif positional and positional[0].lower() in {"fast", "v2"}:
         positional.pop(0)
+
+    if mode not in {"V4_PRINT", "V4_VECTOR"} and v4_specific_option:
+        raise UserError("--width-mm, --bleed-mm và --profile-name chỉ dùng với chế độ print/V4.")
 
     if len(positional) != 2:
         raise UserError("Sai cú pháp. Gõ .\\upscale để xem ví dụ.")
@@ -130,7 +211,13 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool]:
             f"Hệ số phải từ x{MIN_SCALE:g} đến x{MAX_SCALE:g}. "
             "x100 tạo lượng pixel quá lớn và không làm ảnh có thêm chi tiết thật."
         )
-    return mode, file_token, scale, allow_huge
+    width_mm = v4_options["width_mm"]
+    bleed_mm = v4_options["bleed_mm"]
+    if width_mm is not None and not (10.0 <= float(width_mm) <= 100_000.0):
+        raise UserError("--width-mm phải từ 10 đến 100.000 mm.")
+    if not (0.0 <= float(bleed_mm) <= 100.0):
+        raise UserError("--bleed-mm phải từ 0 đến 100 mm.")
+    return mode, file_token, scale, allow_huge, v4_options
 
 
 def resolve_source(token: str) -> Path:
@@ -224,27 +311,519 @@ def inspect_image(path: Path) -> tuple[tuple[int, int], str, bytes | None]:
         with Image.open(path) as image:
             if getattr(image, "n_frames", 1) != 1:
                 raise UserError("Ảnh nhiều khung hình/ảnh động không được hỗ trợ.")
-            image.load()
-            return image.size, image.mode, image.info.get("icc_profile")
+            image.seek(0)
+            icc_profile = image.info.get("icc_profile")
+            source_mode = image.mode
+            oriented = ImageOps.exif_transpose(image)
+            oriented.load()
+            return oriented.size, source_mode, icc_profile
     except (UnidentifiedImageError, OSError) as exc:
         raise UserError(f"Không mở được ảnh: {path.name}") from exc
 
 
-def stage_input(source: Path, job_dir: Path, icc_profile: bytes | None) -> Path:
-    suffix = source.suffix.lower()
-    if suffix in DIRECT_ENGINE_EXTENSIONS:
-        staged = job_dir / f"input{suffix}"
-        shutil.copy2(source, staged)
-        return staged
+def srgb_profile_bytes() -> bytes:
+    candidates = (
+        APP_DIR / "shared" / "tools" / "scribus" / "1.6.6" / "share" / "profiles" / "sRGB.icm",
+        Path(r"C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm"),
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.read_bytes()
+    return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+
+
+def canonical_source_dpi(
+    raw_dpi: object,
+    *,
+    swap_axes: bool = False,
+) -> tuple[float, float] | None:
+    """Return safe isotropic DPI for the staged, orientation-corrected image.
+
+    V4 derives natural print width from horizontal DPI and preserves pixel aspect
+    ratio. Valid anisotropic metadata is therefore deliberately normalised to the
+    oriented horizontal DPI on both axes; malformed or implausible metadata is
+    omitted so the V4 engine uses its documented 96 DPI fallback.
+    """
+
+    try:
+        if isinstance(raw_dpi, (tuple, list)):
+            if not raw_dpi:
+                return None
+            oriented_horizontal = (
+                raw_dpi[1] if swap_axes and len(raw_dpi) > 1 else raw_dpi[0]
+            )
+        else:
+            oriented_horizontal = raw_dpi
+        horizontal = float(oriented_horizontal)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(horizontal):
+        return None
+    if not MIN_SOURCE_DPI <= horizontal <= MAX_SOURCE_DPI:
+        return None
+    return horizontal, horizontal
+
+
+def stage_input(source: Path, job_dir: Path, _icc_profile: bytes | None = None) -> Path:
+    """Create the one colour-safe input consumed by every engine."""
 
     staged = job_dir / "input.png"
     with Image.open(source) as image:
         image.seek(0)
-        if image.mode not in {"RGB", "RGBA"}:
-            image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
-        save_options = {"icc_profile": icc_profile} if icc_profile else {}
-        image.save(staged, format="PNG", **save_options)
+        embedded_icc = image.info.get("icc_profile")
+        source_dpi = image.info.get("dpi")
+        try:
+            orientation = int(image.getexif().get(274, 1))
+        except (AttributeError, TypeError, ValueError):
+            orientation = 1
+        staged_dpi = canonical_source_dpi(
+            source_dpi,
+            swap_axes=orientation in {5, 6, 7, 8},
+        )
+        image = ImageOps.exif_transpose(image)
+        image.load()
+
+        has_alpha = image.mode in {"RGBA", "LA", "PA"} or "transparency" in image.info
+        alpha = image.convert("RGBA").getchannel("A") if has_alpha else None
+        colour = image.convert("RGB") if has_alpha else image
+
+        if embedded_icc:
+            try:
+                source_profile = ImageCms.ImageCmsProfile(BytesIO(embedded_icc))
+                destination_profile = ImageCms.createProfile("sRGB")
+                rgb = ImageCms.profileToProfile(
+                    colour,
+                    source_profile,
+                    destination_profile,
+                    renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC,
+                    outputMode="RGB",
+                )
+            except (ImageCms.PyCMSError, OSError, ValueError):
+                rgb = colour.convert("RGB")
+        else:
+            rgb = colour.convert("RGB")
+
+        if alpha is not None:
+            rgb = Image.composite(rgb, Image.new("RGB", rgb.size, "white"), alpha)
+        save_options: dict[str, object] = {
+            "format": "PNG",
+            "compress_level": 3,
+            "icc_profile": srgb_profile_bytes(),
+        }
+        if staged_dpi is not None:
+            save_options["dpi"] = staged_dpi
+        rgb.save(staged, **save_options)
     return staged
+
+
+def json_sha256(value: object) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def canonical_pixel_sha256(path: Path) -> str:
+    """Hash canonical pixel content, not volatile PNG/ICC container metadata."""
+
+    digest = hashlib.sha256()
+    digest.update(b"RESIZE_CANONICAL_SRGB_WHITE_V1\0")
+    with Image.open(path) as image:
+        image.load()
+        rgb = image.convert("RGB")
+        digest.update(f"{rgb.width}x{rgb.height}:RGB\0".encode("ascii"))
+        rows_per_chunk = 256
+        for top in range(0, rgb.height, rows_per_chunk):
+            bottom = min(rgb.height, top + rows_per_chunk)
+            digest.update(rgb.crop((0, top, rgb.width, bottom)).tobytes())
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=1)
+def current_v3_cache_signature() -> dict[str, object]:
+    missing = [path for path in (*V3_ENGINE_FILES, *V3_MODEL_FILES) if not path.is_file()]
+    if missing:
+        raise UserError(f"Thiếu thành phần V3: {missing[0]}")
+    signature: dict[str, object] = {
+        "cache_config_version": V3_CACHE_CONFIG_VERSION,
+        "engine_sha256": {path.name: sha256_file(path) for path in V3_ENGINE_FILES},
+        "model_sha256": {path.name: sha256_file(path) for path in V3_MODEL_FILES},
+        "run_config": {"scale": 4, "tile": 512, "overlap": 128, "force": True},
+    }
+    signature["signature_sha256"] = json_sha256(signature)
+    return signature
+
+
+def available_physical_memory() -> int | None:
+    """Return currently available RAM on Windows, or None if unavailable."""
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.c_ulong),
+            ("memory_load", ctypes.c_ulong),
+            ("total_physical", ctypes.c_ulonglong),
+            ("available_physical", ctypes.c_ulonglong),
+            ("total_page_file", ctypes.c_ulonglong),
+            ("available_page_file", ctypes.c_ulonglong),
+            ("total_virtual", ctypes.c_ulonglong),
+            ("available_virtual", ctypes.c_ulonglong),
+            ("available_extended_virtual", ctypes.c_ulonglong),
+        ]
+
+    try:
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.available_physical)
+    except (AttributeError, OSError):
+        pass
+    return None
+
+
+def validate_standard_resource_plan(
+    source_size: tuple[int, int],
+    final_size: tuple[int, int],
+    *,
+    allow_huge: bool,
+) -> dict[str, float]:
+    """Enforce a non-bypassable Pillow-safe cap for V2/V3 raster files."""
+
+    source_pixels = source_size[0] * source_size[1]
+    native_mp = source_pixels * 16 / 1_000_000
+    output_mp = final_size[0] * final_size[1] / 1_000_000
+    if native_mp > HARD_RASTER_MEGAPIXELS or output_mp > HARD_RASTER_MEGAPIXELS:
+        raise UserError(
+            "Kế hoạch raster vượt giới hạn an toàn cứng "
+            f"({native_mp:.1f} MP master, {output_mp:.1f} MP output; "
+            f"tối đa {HARD_RASTER_MEGAPIXELS:g} MP)."
+        )
+    if output_mp > MAX_MEGAPIXELS and not allow_huge:
+        raise UserError(
+            f"Kết quả sẽ là {final_size[0]}x{final_size[1]} ({output_mp:.1f} MP). "
+            "Nếu đã tính đúng và máy in chấp nhận, thêm --allow-huge."
+        )
+    return {
+        "native_megapixels": round(native_mp, 3),
+        "output_megapixels": round(output_mp, 3),
+    }
+
+
+def validate_v4_resource_plan(
+    source_size: tuple[int, int],
+    proof_size: tuple[int, int],
+    *,
+    full_vector: bool,
+    allow_huge: bool,
+) -> dict[str, float]:
+    source_pixels = source_size[0] * source_size[1]
+    proof_pixels = proof_size[0] * proof_size[1]
+    native_pixels = source_pixels * (4 if full_vector else 16)
+    source_mp = source_pixels / 1_000_000
+    native_mp = native_pixels / 1_000_000
+    proof_mp = proof_pixels / 1_000_000
+
+    peak_ram_bytes = max(native_pixels * 24, proof_pixels * 20) + 2 * 1024**3
+    working_disk_bytes = native_pixels * 5 + proof_pixels * 12 + 1024**3
+    estimates = {
+        "source_megapixels": round(source_mp, 3),
+        "native_megapixels": round(native_mp, 3),
+        "output_megapixels": round(proof_mp, 3),
+        "estimated_peak_ram_gib": round(peak_ram_bytes / 1024**3, 2),
+        "estimated_working_disk_gib": round(working_disk_bytes / 1024**3, 2),
+    }
+
+    if (
+        source_mp > V4_HARD_SOURCE_MEGAPIXELS
+        or native_mp > V4_HARD_NATIVE_MEGAPIXELS
+        or proof_mp > V4_HARD_OUTPUT_MEGAPIXELS
+    ):
+        raise UserError(
+            "Kế hoạch V4 vượt giới hạn an toàn cứng "
+            f"({source_mp:.1f} MP nguồn, {native_mp:.1f} MP master, {proof_mp:.1f} MP output)."
+        )
+
+    exceeds_soft_limit = source_mp > V4_SOFT_SOURCE_MEGAPIXELS or proof_mp > MAX_MEGAPIXELS
+    if exceeds_soft_limit and not allow_huge:
+        raise UserError(
+            f"V4 ước tính cần {estimates['estimated_peak_ram_gib']:.2f} GiB RAM và "
+            f"{estimates['estimated_working_disk_gib']:.2f} GiB ổ đĩa tạm. "
+            "Kiểm tra kỹ rồi thêm --allow-huge nếu muốn chạy."
+        )
+
+    free_disk = shutil.disk_usage(APP_DIR).free
+    if working_disk_bytes > free_disk * 0.8:
+        raise UserError(
+            f"Không đủ dung lượng tạm: ước tính {working_disk_bytes / 1024**3:.2f} GiB, "
+            f"hiện trống {free_disk / 1024**3:.2f} GiB."
+        )
+    free_ram = available_physical_memory()
+    if free_ram is not None and peak_ram_bytes > free_ram * 0.85:
+        raise UserError(
+            f"Không đủ RAM khả dụng: ước tính {peak_ram_bytes / 1024**3:.2f} GiB, "
+            f"hiện khả dụng {free_ram / 1024**3:.2f} GiB."
+        )
+    return estimates
+
+
+def find_cached_v3_native(source_sha256: str, normalized_sha256: str) -> Path | None:
+    signature = current_v3_cache_signature()
+    cache_dir = APP_DIR / "masters" / "V4_AI_BASE"
+    canonical_cache = cache_dir / f"{normalized_sha256}_NATIVE_x4.png"
+    legacy_cache = cache_dir / f"{source_sha256}_NATIVE_x4.png"
+    private_candidates = [canonical_cache]
+    if legacy_cache != canonical_cache:
+        private_candidates.append(legacy_cache)
+    if cache_dir.is_dir():
+        private_candidates.extend(
+            sidecar.with_suffix("")
+            for sidecar in cache_dir.glob("*_NATIVE_x4.png.json")
+        )
+
+    seen: set[str] = set()
+    for private_cache in private_candidates:
+        cache_key = str(private_cache.resolve()).casefold()
+        if cache_key in seen:
+            continue
+        seen.add(cache_key)
+        private_manifest = private_cache.with_suffix(private_cache.suffix + ".json")
+        if not private_cache.is_file() or not private_manifest.is_file():
+            continue
+        try:
+            metadata = json.loads(private_manifest.read_text(encoding="utf-8"))
+            if (
+                metadata.get("pipeline") == "V4_V3_NATIVE_CACHE"
+                and (
+                    metadata.get("canonical_pixel_sha256")
+                    or metadata.get("normalized_stage_sha256")
+                )
+                == normalized_sha256
+                and metadata.get("v3_cache_signature") == signature
+                and metadata.get("native_sha256") == sha256_file(private_cache)
+            ):
+                return private_cache
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+
+    manifest_root = APP_DIR / "manifests" / "V3_HIGH"
+    if not manifest_root.is_dir():
+        return None
+    for candidate in manifest_root.rglob("*.json"):
+        try:
+            metadata = json.loads(candidate.read_text(encoding="utf-8"))
+            if metadata.get("normalized_stage_sha256") != normalized_sha256:
+                continue
+            if metadata.get("v3_cache_signature") != signature:
+                continue
+            native = Path(str(metadata["native_output"]))
+            expected_sha = str(metadata.get("native_sha256", ""))
+            if expected_sha and native.is_file() and sha256_file(native) == expected_sha:
+                return native
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def find_cached_v4_deep(
+    canonical_pixel_sha256: str,
+    v3_native_sha256: str,
+    scale: float,
+    *,
+    legacy_source_sha256: str | None = None,
+) -> tuple[Path, dict[str, object]] | None:
+    cache_dir = APP_DIR / "masters" / "V4_DEEP"
+    scale_token = scale_tag(scale)
+    canonical_target = cache_dir / f"{canonical_pixel_sha256}_DEEP_x{scale_token}.png"
+    candidates = [canonical_target]
+    if legacy_source_sha256:
+        legacy_target = cache_dir / f"{legacy_source_sha256}_DEEP_x{scale_token}.png"
+        if legacy_target != canonical_target:
+            candidates.append(legacy_target)
+    if cache_dir.is_dir():
+        candidates.extend(
+            sidecar.with_suffix("")
+            for sidecar in cache_dir.glob(f"*_DEEP_x{scale_token}.png.json")
+        )
+    if not V4_DEEP_ENGINE.is_file() or not V4_DEEP_MODEL.is_file():
+        return None
+    engine_sha256 = sha256_file(V4_DEEP_ENGINE)
+    model_sha256 = sha256_file(V4_DEEP_MODEL)
+    seen: set[str] = set()
+    for target in candidates:
+        target_key = str(target.resolve()).casefold()
+        if target_key in seen:
+            continue
+        seen.add(target_key)
+        manifest_path = target.with_suffix(target.suffix + ".json")
+        if not target.is_file() or not manifest_path.is_file():
+            continue
+        try:
+            metadata = json.loads(manifest_path.read_text(encoding="utf-8"))
+            recorded_identity = metadata.get("canonical_pixel_sha256")
+            if recorded_identity is not None and recorded_identity != canonical_pixel_sha256:
+                continue
+            if metadata.get("pipeline") != "V4_DEEP_RECURSIVE_HAT":
+                continue
+            if metadata.get("config_version") != V4_DEEP_CONFIG_VERSION:
+                continue
+            if metadata.get("engine_sha256") != engine_sha256:
+                continue
+            if str(metadata.get("model_sha256", "")).lower() != model_sha256:
+                continue
+            if metadata.get("v3_native_sha256") != v3_native_sha256:
+                continue
+            if not abs(float(metadata.get("final_scale")) - scale) < 1e-9:
+                continue
+            if metadata.get("output_sha256") != sha256_file(target):
+                continue
+            return target, metadata
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def prepare_v4_deep_base(
+    source: Path,
+    staged_input: Path,
+    job_dir: Path,
+    proof_size: tuple[int, int],
+    scale: float,
+    allow_huge: bool,
+) -> tuple[Path, dict[str, object]]:
+    """Create or reuse the Deep raster evaluated as a V4 ablation candidate."""
+    source_sha = sha256_file(source)
+    normalized_sha = canonical_pixel_sha256(staged_input)
+    native = find_cached_v3_native(source_sha, normalized_sha)
+    reused_v3 = native is not None
+    if native is None:
+        if not PYTHON.is_file() or not V3_ENGINE.is_file():
+            raise UserError("V4 PRINT cần engine V3 để tạo lớp AI; engine V3 đang bị thiếu.")
+        generated_native = job_dir / "v3_ai_native_x4.png"
+        command = [
+            str(PYTHON),
+            "-B",
+            str(V3_ENGINE),
+            str(staged_input),
+            "4",
+            str(generated_native),
+            "--tile",
+            "512",
+            "--overlap",
+            "128",
+            "--force",
+        ]
+        print("  AI tầng 1: chưa có cache; đang chạy V3 GPU native x4...", flush=True)
+        subprocess.run(command, check=True, cwd=ROOT_DIR)
+        cache_target = (
+            APP_DIR
+            / "masters"
+            / "V4_AI_BASE"
+            / f"{normalized_sha}_NATIVE_x4.png"
+        )
+        atomic_install(generated_native, cache_target)
+        with Image.open(cache_target) as native_image:
+            native_image.load()
+            native_size = list(native_image.size)
+        write_json_atomic(
+            {
+                "pipeline": "V4_V3_NATIVE_CACHE",
+                "cache_version": V3_CACHE_CONFIG_VERSION,
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "source": str(source),
+                "source_sha256": source_sha,
+                "normalized_stage_sha256": normalized_sha,
+                "canonical_pixel_sha256": normalized_sha,
+                "cache_key_type": "canonical_srgb_pixels_v1",
+                "v3_cache_signature": current_v3_cache_signature(),
+                "native_sha256": sha256_file(cache_target),
+                "native_size": native_size,
+            },
+            cache_target.with_suffix(cache_target.suffix + ".json"),
+        )
+        native = cache_target
+    else:
+        print(f"  AI tầng 1: tái sử dụng master V3 x4 đã kiểm định: {native}", flush=True)
+
+    native_sha = sha256_file(native)
+    cached = find_cached_v4_deep(
+        normalized_sha,
+        native_sha,
+        scale,
+        legacy_source_sha256=source_sha,
+    )
+    reused_deep = cached is not None
+    if cached is not None:
+        raster_base, deep_manifest = cached
+        print(f"  AI tầng 2: tái sử dụng V4 Deep HAT x{scale:g}: {raster_base}", flush=True)
+    else:
+        if not PYTHON.is_file() or not V4_DEEP_ENGINE.is_file():
+            raise UserError("Thiếu engine V4 Deep hoặc môi trường CUDA V3.")
+        generated_deep = job_dir / f"v4_deep_x{scale_tag(scale)}.png"
+        command = [
+            str(PYTHON),
+            "-B",
+            str(V4_DEEP_ENGINE),
+            str(staged_input),
+            str(native),
+            f"{scale:g}",
+            str(generated_deep),
+            "--tile",
+            "512",
+            "--overlap",
+            "128",
+            "--dtype",
+            "auto",
+            "--force",
+        ]
+        if allow_huge:
+            command.append("--allow-huge")
+        print(
+            "  AI tầng 2: đang chạy HAT phục hồi lần hai trên toàn ảnh; "
+            "đây là bước V4 chất lượng cao và sẽ lâu...",
+            flush=True,
+        )
+        subprocess.run(command, check=True, cwd=ROOT_DIR)
+        generated_manifest = generated_deep.with_suffix(generated_deep.suffix + ".json")
+        if not generated_manifest.is_file():
+            raise RuntimeError("V4 Deep không tạo manifest kiểm định.")
+        deep_manifest = json.loads(generated_manifest.read_text(encoding="utf-8"))
+        deep_manifest["deep_input"] = deep_manifest.get("source")
+        deep_manifest["deep_input_sha256"] = deep_manifest.get("source_sha256")
+        deep_manifest["source"] = str(source)
+        deep_manifest["source_sha256"] = source_sha
+        deep_manifest["canonical_pixel_sha256"] = normalized_sha
+        deep_manifest["cache_key_type"] = "canonical_srgb_pixels_v1"
+        cache_target = (
+            APP_DIR
+            / "masters"
+            / "V4_DEEP"
+            / f"{normalized_sha}_DEEP_x{scale_tag(scale)}.png"
+        )
+        atomic_install(generated_deep, cache_target)
+        deep_manifest["output"] = str(cache_target)
+        deep_manifest["output_sha256"] = sha256_file(cache_target)
+        write_json_atomic(
+            deep_manifest, cache_target.with_suffix(cache_target.suffix + ".json")
+        )
+        raster_base = cache_target
+
+    with Image.open(raster_base) as image:
+        image.load()
+        if image.size != proof_size:
+            raise RuntimeError(f"V4 Deep tạo {image.size}, cần đúng {proof_size}.")
+    return raster_base, {
+        "pipeline": "V4_DEEP_RECURSIVE_HAT",
+        "native_path": str(native),
+        "native_sha256": native_sha,
+        "deep_path": str(raster_base),
+        "deep_sha256": sha256_file(raster_base),
+        "deep_size": list(proof_size),
+        "deep_scale": scale,
+        "normalized_stage_sha256": normalized_sha,
+        "canonical_pixel_sha256": normalized_sha,
+        "cache_key_type": "canonical_srgb_pixels_v1",
+        "v3_cache_signature": current_v3_cache_signature(),
+        "deep_run": deep_manifest.get("run"),
+        "reused_v3_cache": reused_v3,
+        "reused_deep_cache": reused_deep,
+    }
 
 
 def scale_tag(scale: float) -> str:
@@ -275,6 +854,23 @@ def write_json_atomic(data: dict, target: Path) -> None:
     os.replace(temporary, target)
 
 
+def atomic_install_directory(source: Path, target: Path) -> None:
+    """Publish one validated V4 bundle while preserving the previous good bundle."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup = target.with_name(f".{target.name}.old-{uuid.uuid4().hex}")
+    had_previous = target.exists()
+    if had_previous:
+        os.replace(target, backup)
+    try:
+        os.replace(source, target)
+    except BaseException:
+        if had_previous and backup.exists() and not target.exists():
+            os.replace(backup, target)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+
+
 @contextlib.contextmanager
 def gpu_job_lock():
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -296,16 +892,245 @@ def gpu_job_lock():
             msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def run_job(
+def run_v4_job(
     mode: str,
     source: Path,
     scale: float,
     allow_huge: bool,
+    v4_options: dict[str, object],
     *,
     output_subdir: Path | None = None,
     output_stem: str | None = None,
     batch_root: Path | None = None,
 ) -> Path:
+    if not PYTHON_V4.is_file():
+        raise UserError(
+            f"Thiếu môi trường V4: {PYTHON_V4}. Hãy chạy APP\\engines\\V4\\setup_v4.ps1."
+        )
+    if not V4_ENGINE.is_file():
+        raise UserError(f"Thiếu engine V4: {V4_ENGINE}")
+
+    source_size, source_mode, icc_profile = inspect_image(source)
+    proof_size = tuple(int(round(value * scale)) for value in source_size)
+    megapixels = proof_size[0] * proof_size[1] / 1_000_000
+    full_vector = mode == "V4_VECTOR"
+    resource_plan = validate_v4_resource_plan(
+        source_size,
+        proof_size,
+        full_vector=full_vector,
+        allow_huge=allow_huge,
+    )
+
+    relative_dir = output_subdir or Path()
+    result_stem = output_stem or source.stem
+    file_tag = "V4_VECTOR" if full_vector else "V4_PRINT"
+    target_dir = OUTPUT_DIR / mode / relative_dir / f"{result_stem}_{file_tag}"
+    report_path = (
+        APP_DIR
+        / "manifests"
+        / mode
+        / relative_dir
+        / f"{result_stem}_{file_tag}_x{scale_tag(scale)}.json"
+    )
+    target_svg = target_dir / f"{result_stem}_EDITABLE.svg"
+    target_pdf = target_dir / f"{result_stem}_PRINT_PDFX4.pdf"
+    target_png = target_dir / f"{result_stem}_PREVIEW_x{scale_tag(scale)}.png"
+
+    width_mm = v4_options.get("width_mm")
+    bleed_mm = float(v4_options.get("bleed_mm", 0.0))
+    profile_name = str(
+        v4_options.get("profile_name", "ISO Coated v2 300% (basICColor)")
+    )
+
+    print("\nTHÔNG TIN LỆNH")
+    print(
+        "  Chế độ : "
+        + (
+            "V4 VECTOR (toàn path, dành cho đồ họa phẳng)"
+            if full_vector
+            else "V4 DEEP PRINT (guarded-USM/Deep ablation + gate native-x4 + PDF/X-4)"
+        )
+    )
+    print(f"  Input  : {source}")
+    print(f"  Nguồn  : {source_size[0]}x{source_size[1]} px, {source_mode}")
+    print(f"  Preview: {proof_size[0]}x{proof_size[1]} px ({megapixels:.1f} MP)")
+    print(
+        "  Tài nguyên ước tính: "
+        f"{resource_plan['estimated_peak_ram_gib']:.2f} GiB RAM, "
+        f"{resource_plan['estimated_working_disk_gib']:.2f} GiB ổ tạm"
+    )
+    if width_mm is not None:
+        height_mm = float(width_mm) * source_size[1] / source_size[0]
+        print(f"  Khổ in : {float(width_mm):g} x {height_mm:g} mm")
+    else:
+        print("  Khổ in : theo DPI nguồn (có thể đặt bằng --width-mm)")
+    print(f"  Output : {target_dir}\n", flush=True)
+
+    started = time.perf_counter()
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_bundle = target_dir.parent / f".{target_dir.name}.new-{uuid.uuid4().hex}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="job_v4_", dir=WORK_DIR) as temporary_raw:
+            job_dir = Path(temporary_raw)
+            staged_input = stage_input(source, job_dir, icc_profile)
+            canonical_input_sha256 = canonical_pixel_sha256(staged_input)
+            raster_base: Path | None = None
+            ai_base_info: dict[str, object] | None = None
+            if not full_vector:
+                raster_base, ai_base_info = prepare_v4_deep_base(
+                    source,
+                    staged_input,
+                    job_dir,
+                    proof_size,
+                    scale,
+                    allow_huge,
+                )
+            command = [
+                str(PYTHON_V4),
+                "-B",
+                str(V4_ENGINE),
+                str(staged_input),
+                f"{scale:g}",
+                str(staging_bundle),
+                "--name",
+                result_stem,
+                "--bleed-mm",
+                f"{bleed_mm:g}",
+                "--profile-name",
+                profile_name,
+            ]
+            if raster_base is not None:
+                command.extend(
+                    [
+                        "--raster-base",
+                        str(raster_base),
+                        "--v3-baseline",
+                        str(ai_base_info["native_path"]),
+                    ]
+                )
+            else:
+                command.append("--full-vector")
+            if width_mm is not None:
+                command.extend(["--width-mm", f"{float(width_mm):g}"])
+            if allow_huge:
+                command.append("--allow-huge")
+
+            subprocess.run(command, check=True, cwd=ROOT_DIR)
+            engine_manifest_path = staging_bundle / "manifest.json"
+            if not engine_manifest_path.is_file():
+                raise RuntimeError("V4 không tạo báo cáo kiểm định.")
+            metadata = json.loads(engine_manifest_path.read_text(encoding="utf-8"))
+            if not metadata.get("visual_qa", {}).get("passed"):
+                raise RuntimeError("V4 không vượt kiểm tra chất lượng hình ảnh.")
+            if (
+                not full_vector
+                and not metadata.get("hybrid_retention_qa", {}).get("passed")
+            ):
+                raise RuntimeError("V4 PRINT làm suy giảm raster đã được chọn vượt ngưỡng an toàn.")
+            if not full_vector:
+                comparative = metadata.get("comparative_v3_v4_qa")
+                if not isinstance(comparative, dict):
+                    raise RuntimeError("V4 PRINT thiếu cổng so sánh trực tiếp V3/V4.")
+                if comparative.get("final_output_not_worse_than_v3") is not True:
+                    raise RuntimeError("V4 PRINT chưa chứng minh đầu ra cuối không kém V3.")
+            svg_images = int(metadata.get("vector", {}).get("embedded_image_count", -1))
+            pdf_images = int(metadata.get("pdfx4_qa", {}).get("images", -1))
+            if full_vector and (svg_images != 0 or pdf_images != 0):
+                raise RuntimeError("Chế độ V4 VECTOR còn chứa ảnh raster nhúng.")
+            if not full_vector and (svg_images < 1 or pdf_images < 1):
+                raise RuntimeError("V4 PRINT thiếu lớp raster đã được QA và khai báo provenance.")
+            if metadata.get("pdfx4_qa", {}).get("gts_pdfx_version") != "PDF/X-4":
+                raise RuntimeError("PDF V4 không được nhận diện là PDF/X-4.")
+            if metadata.get("pdf_placement_qa", {}).get("passed") is not True:
+                raise RuntimeError("PDF V4 chưa chứng minh artwork phủ đúng trang in và bleed.")
+
+            staged_files = {
+                kind: staging_bundle / payload["name"]
+                for kind, payload in metadata.get("outputs", {}).items()
+            }
+            if set(staged_files) != {"svg", "pdf", "png"}:
+                raise RuntimeError("Bundle V4 không đủ SVG, PDF và PNG.")
+            for kind, path in staged_files.items():
+                if not path.is_file() or path.stat().st_size == 0:
+                    raise RuntimeError(f"File V4 {kind.upper()} bị thiếu hoặc rỗng.")
+            with Image.open(staged_files["png"]) as proof:
+                proof.load()
+                if proof.size != proof_size:
+                    raise RuntimeError(f"V4 tạo preview {proof.size}, cần {proof_size}.")
+
+            total_seconds = round(time.perf_counter() - started, 3)
+            engine_manifest_path.unlink()
+            atomic_install_directory(staging_bundle, target_dir)
+
+            metadata.update(
+                {
+                    "launcher": "Local Print Image Upscaler unified command",
+                    "app_version": APP_VERSION,
+                    "source": str(source),
+                    "source_sha256": sha256_file(source),
+                    "source_size": list(source_size),
+                    "canonical_input_sha256": canonical_input_sha256,
+                    "resource_plan": resource_plan,
+                    "final_bundle": str(target_dir),
+                    "ai_base": ai_base_info,
+                    "launcher_total_seconds": total_seconds,
+                    "finished_utc": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            for kind, final_path in {
+                "svg": target_svg,
+                "pdf": target_pdf,
+                "png": target_png,
+            }.items():
+                metadata["outputs"][kind].update(
+                    {
+                        "path": str(final_path),
+                        "sha256": sha256_file(final_path),
+                        "bytes": final_path.stat().st_size,
+                    }
+                )
+            if batch_root is not None:
+                metadata["batch_root"] = str(batch_root)
+                metadata["batch_relative_source"] = str(source.relative_to(batch_root))
+            write_json_atomic(metadata, report_path)
+            report_prefix = f"{result_stem}_{file_tag}_x"
+            for stale_report in report_path.parent.glob("*.json"):
+                if stale_report != report_path and stale_report.name.startswith(report_prefix):
+                    stale_report.unlink()
+    finally:
+        if staging_bundle.exists():
+            shutil.rmtree(staging_bundle)
+
+    print("\nHOÀN TẤT V4")
+    print(f"  SVG chỉnh sửa : {target_svg}")
+    print(f"  PDF giao in   : {target_pdf}")
+    print(f"  PNG xem nhanh : {target_png}")
+    print(f"  Thời gian     : {total_seconds:.1f} giây")
+    return target_dir
+
+
+def run_job(
+    mode: str,
+    source: Path,
+    scale: float,
+    allow_huge: bool,
+    v4_options: dict[str, object] | None = None,
+    *,
+    output_subdir: Path | None = None,
+    output_stem: str | None = None,
+    batch_root: Path | None = None,
+) -> Path:
+    if mode in {"V4_PRINT", "V4_VECTOR"}:
+        return run_v4_job(
+            mode,
+            source,
+            scale,
+            allow_huge,
+            v4_options or {},
+            output_subdir=output_subdir,
+            output_stem=output_stem,
+            batch_root=batch_root,
+        )
     if not PYTHON.is_file():
         raise UserError(f"Thiếu Python nội bộ: {PYTHON}")
     if not V2_ENGINE.is_file() or not V3_ENGINE.is_file():
@@ -313,12 +1138,12 @@ def run_job(
 
     source_size, source_mode, icc_profile = inspect_image(source)
     final_size = tuple(int(round(value * scale)) for value in source_size)
-    megapixels = final_size[0] * final_size[1] / 1_000_000
-    if megapixels > MAX_MEGAPIXELS and not allow_huge:
-        raise UserError(
-            f"Kết quả sẽ là {final_size[0]}x{final_size[1]} ({megapixels:.1f} MP). "
-            "Nếu đã tính đúng và máy in chấp nhận, thêm --allow-huge."
-        )
+    standard_plan = validate_standard_resource_plan(
+        source_size,
+        final_size,
+        allow_huge=allow_huge,
+    )
+    megapixels = standard_plan["output_megapixels"]
 
     tag = scale_tag(scale)
     file_tag = "V2_FAST" if mode == "V2_FAST" else "V3_HIGH"
@@ -384,7 +1209,7 @@ def run_job(
                 "source": str(source),
                 "source_sha256": sha256_file(source),
                 "source_size": list(source_size),
-                "normalized_stage_sha256": sha256_file(staged_input),
+                "normalized_stage_sha256": canonical_pixel_sha256(staged_input),
                 "native_output": str(actual_master),
                 "native_sha256": sha256_file(actual_master),
                 "final_scale": scale,
@@ -395,6 +1220,8 @@ def run_job(
                 "finished_utc": datetime.now(timezone.utc).isoformat(),
             }
         )
+        if mode == "V3_HIGH":
+            metadata["v3_cache_signature"] = current_v3_cache_signature()
         if batch_root is not None:
             metadata["batch_root"] = str(batch_root)
             metadata["batch_relative_source"] = str(source.relative_to(batch_root))
@@ -408,8 +1235,17 @@ def run_job(
     return target
 
 
-def run_batch(mode: str, directory: Path, scale: float, allow_huge: bool) -> int:
-    if not PYTHON.is_file() or not V2_ENGINE.is_file() or not V3_ENGINE.is_file():
+def run_batch(
+    mode: str,
+    directory: Path,
+    scale: float,
+    allow_huge: bool,
+    v4_options: dict[str, object],
+) -> int:
+    if mode in {"V4_PRINT", "V4_VECTOR"}:
+        if not PYTHON_V4.is_file() or not V4_ENGINE.is_file():
+            raise UserError("Thiếu Python hoặc engine V4 trong APP; batch chưa thể chạy.")
+    elif not PYTHON.is_file() or not V2_ENGINE.is_file() or not V3_ENGINE.is_file():
         raise UserError("Thiếu Python hoặc engine V2/V3 trong APP; batch chưa thể chạy.")
     images = collect_batch_images(directory)
     tag = scale_tag(scale)
@@ -437,6 +1273,7 @@ def run_batch(mode: str, directory: Path, scale: float, allow_huge: bool) -> int
                 source,
                 scale,
                 allow_huge,
+                v4_options,
                 output_subdir=batch_group / relative_parent,
                 output_stem=result_stem,
                 batch_root=directory,
@@ -465,12 +1302,14 @@ def run_batch(mode: str, directory: Path, scale: float, allow_huge: bool) -> int
 
 def main(argv: list[str] | None = None) -> int:
     configure_console()
-    mode, file_token, scale, allow_huge = parse_command(list(sys.argv[1:] if argv is None else argv))
+    mode, file_token, scale, allow_huge, v4_options = parse_command(
+        list(sys.argv[1:] if argv is None else argv)
+    )
     source = resolve_source(file_token)
     with gpu_job_lock():
         if source.is_dir():
-            return run_batch(mode, source, scale, allow_huge)
-        run_job(mode, source, scale, allow_huge)
+            return run_batch(mode, source, scale, allow_huge, v4_options)
+        run_job(mode, source, scale, allow_huge, v4_options)
         return 0
 
 

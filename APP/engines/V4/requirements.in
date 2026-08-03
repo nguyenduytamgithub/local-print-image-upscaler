@@ -1,0 +1,5 @@
+numpy==2.4.4
+opencv-python-headless==5.0.0.93
+Pillow==12.3.0
+pikepdf==10.11.0
+vtracer==0.6.15
