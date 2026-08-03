@@ -283,6 +283,10 @@ APP/
   engines/V4/             V4 Print, export PDF/X-4 và kiểm thử
   engines/V5/             tách layer, tái tạo nền, PSD/ORA và kiểm thử
   manifests/              báo cáo kỹ thuật cục bộ
+  masters/                master/cache render cục bộ, có thể tái tạo, không đưa lên Git
+  shared/                 công cụ phụ thuộc tải cục bộ, không đưa lên Git
+  verification/           kết quả QA máy cục bộ, không đưa lên Git
+  work/                   khóa và file công việc tạm; chương trình tự quản lý
 upscale.cmd               lệnh duy nhất người dùng cần gọi
 VERSION                   phiên bản ứng dụng
 CHANGELOG.md              lịch sử thay đổi
