@@ -1,4 +1,4 @@
-"""Single public command for the local V2, V3, V4 and smart-layer V5 engines."""
+"""Single public command for the local V2 through V7 image engines."""
 
 from __future__ import annotations
 
@@ -36,6 +36,8 @@ V4_HARD_NATIVE_MEGAPIXELS = HARD_RASTER_MEGAPIXELS
 V4_HARD_OUTPUT_MEGAPIXELS = HARD_RASTER_MEGAPIXELS
 V5_SOFT_OUTPUT_MEGAPIXELS = 120.0
 V5_HARD_OUTPUT_MEGAPIXELS = 300.0
+V7_SOFT_OUTPUT_MEGAPIXELS = 120.0
+V7_HARD_OUTPUT_MEGAPIXELS = 300.0
 MIN_SOURCE_DPI = 10.0
 MAX_SOURCE_DPI = 2_400.0
 V3_CACHE_CONFIG_VERSION = 2
@@ -50,11 +52,15 @@ PYTHON = APP_DIR / "engines" / "V3" / ".venv" / "Scripts" / "python.exe"
 PYTHON_V4 = APP_DIR / "engines" / "V4" / ".venv" / "Scripts" / "python.exe"
 PYTHON_V5_LOCAL = APP_DIR / "engines" / "V5" / ".venv" / "Scripts" / "python.exe"
 PYTHON_V5 = PYTHON_V5_LOCAL if PYTHON_V5_LOCAL.is_file() else PYTHON
+PYTHON_V7 = APP_DIR / "engines" / "V7" / ".venv" / "Scripts" / "python.exe"
 V2_ENGINE = APP_DIR / "engines" / "V2" / "upsize_ai_v2.py"
 V3_ENGINE = APP_DIR / "engines" / "V3" / "upsize_ai_v3_master.py"
 V4_ENGINE = APP_DIR / "engines" / "V4" / "upsize_vector_v4.py"
 V4_DEEP_ENGINE = APP_DIR / "engines" / "V4" / "deep_raster_v4.py"
 V5_ENGINE = APP_DIR / "engines" / "V5" / "layer_engine_v5.py"
+V7_ENGINE = APP_DIR / "engines" / "V7" / "design_repair_v7.py"
+V7_MODELS = APP_DIR / "engines" / "V7" / "models"
+V7_TESSDATA = V7_MODELS / "tessdata"
 V4_DEEP_MODEL = APP_DIR / "engines" / "V3" / "models" / "Real_HAT_GAN_sharper.pth"
 V4_DEEP_CONFIG_VERSION = 1
 V3_MODEL_FILES = (
@@ -136,6 +142,13 @@ UPSCALE ẢNH GPU
    .\\upscale layers <file-hoặc-thư-mục> <n> [--max-layers 4..60]
                    [--inpaint auto|poster|lama] [--no-semantic] [--allow-huge]
 
+7. Dùng V7 phục dựng chữ hỏng/mờ/sai trên poster, có bước duyệt nội dung:
+   .\\upscale repair <file-hoặc-thư-mục> <n>
+                   [--review gui|defer|auto|strict]
+                   [--review-file <TEXT_REVIEW.json>]
+                   [--ocr-passes 1..3] [--no-language-model]
+                   [--inpaint auto|poster|opencv|strict] [--allow-huge]
+
 Đường dẫn là thư mục thì chương trình chạy tất cả ảnh trong thư mục và
 các thư mục con với cùng một hệ số n.
 
@@ -149,12 +162,17 @@ Ví dụ:
    .\\upscale print "D:\\BO ANH" 4 --width-mm 4000
    .\\upscale layers poster.png 1
    .\\upscale layers "D:\\BO ANH" 4
+   .\\upscale repair poster.png 1
+   .\\upscale repair poster.png 4 --review defer
+   .\\upscale repair poster.png 4 --review-file "D:\\TEXT_REVIEW.json"
+   .\\upscale repair poster.png 4 --review strict --review-file "D:\\TEXT_REVIEW.json"
 
 Kết quả V2: {OUTPUT_DIR / 'V2_FAST'}
 Kết quả V3: {OUTPUT_DIR / 'V3_HIGH'}
 Kết quả V4 Print : {OUTPUT_DIR / 'V4_PRINT'}
 Kết quả V4 Vector: {OUTPUT_DIR / 'V4_VECTOR'}
 Kết quả V5 Layer : {OUTPUT_DIR / 'V5_LAYERS'}
+Kết quả V7 Repair: {OUTPUT_DIR / 'V7_REPAIR'}
 
 Mỗi bundle V4 có 3 file thật:
    *_EDITABLE.svg       raster được QA + path vector opacity 0 để chỉnh sửa
@@ -167,10 +185,18 @@ PSD/ORA là layer raster RGB thật; OCR chỉ đặt tên hỗ trợ, không gi
 Phần nền vốn bị vật thể che được tái tạo hợp lý và được ghi rõ là nền suy đoán.
 V5 là tài liệu trung gian để sửa, không phải PDF/X hoặc CMYK giao in và không cam kết giữ DPI/khổ vật lý.
 
+V7 không chỉ phóng to. Chữ được duyệt sẽ bị gỡ khỏi bitmap nguồn, nền trong đúng
+vùng đó được dựng lại, rồi chữ Unicode sạch được vẽ trực tiếp ở kích thước cuối.
+Giá, SĐT, mã hàng, địa chỉ và mọi thay đổi chính tả luôn cần duyệt. Nếu còn vùng
+chưa duyệt hoặc QA thất bại, bundle ghi rõ REVIEW_REQUIRED/FAILED_QA và không tự
+nhận là file giao in. Khi chạy cả thư mục, V7 dùng --review defer để không mở hàng loạt cửa sổ.
+Sau khi sửa từng TEXT_REVIEW.json, chạy lại cùng lệnh thư mục để V7 tự nạp đúng review cũ.
+--review strict bắt buộc quyết định rõ cho mọi vùng; review được khóa bằng SHA-256 và fingerprint.
+
 Nếu khổ thành phẩm cộng bleed vượt 5.000 mm, PDF V4 tự chọn tỷ lệ 1:d nhỏ nhất và ghi rõ
 trong báo cáo kỹ thuật. Hãy thay ICC mặc định bằng profile của nhà in khi họ cung cấp.
 
-n là hệ số chiều rộng và chiều cao, từ 2 đến 20; riêng V5 nhận cả n=1 để chỉnh nhẹ.
+n là hệ số chiều rộng và chiều cao, từ 2 đến 20; riêng V5/V7 nhận cả n=1 để chỉnh nhẹ.
 V2/V3/V4 thường dùng n=4 hoặc n=10; V5 nên dùng n=1 để sửa nhẹ hoặc n=4 khi cần canvas layer lớn.
 Cùng một lệnh chạy lại sẽ thay kết quả cũ
 một cách an toàn sau khi file mới đã render và kiểm tra xong.
@@ -192,9 +218,15 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
         "max_layers": 24,
         "inpaint": "auto",
         "semantic": True,
+        "review": "gui",
+        "review_file": None,
+        "language_model": True,
+        "ocr_passes": 3,
     }
     v4_specific_option = False
     v5_specific_option = False
+    v5_v7_specific_option = False
+    v7_specific_option = False
     index = 0
     while index < len(argv):
         value = argv[index]
@@ -204,23 +236,52 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
         elif lowered == "--no-semantic":
             v4_options["semantic"] = False
             v5_specific_option = True
-        elif lowered in {"--max-layers", "--inpaint"}:
+        elif lowered == "--no-language-model":
+            v4_options["language_model"] = False
+            v7_specific_option = True
+        elif lowered in {"--review", "--review-file", "--ocr-passes"}:
             if index + 1 >= len(argv):
                 raise UserError(f"Thiếu giá trị sau {value}.")
             raw = argv[index + 1]
-            if lowered == "--max-layers":
+            if lowered == "--review":
+                if raw.lower() not in {"gui", "defer", "auto", "strict"}:
+                    raise UserError("--review chỉ nhận gui, defer, auto hoặc strict.")
+                v4_options["review"] = raw.lower()
+            elif lowered == "--review-file":
+                if not raw.strip():
+                    raise UserError("--review-file không được để trống.")
+                v4_options["review_file"] = raw
+            else:
                 try:
                     number = int(raw)
                 except ValueError as exc:
                     raise UserError(f"Giá trị không hợp lệ cho {value}: {raw}") from exc
-                if not 4 <= number <= 60:
-                    raise UserError("--max-layers phải từ 4 đến 60.")
-                v4_options["max_layers"] = number
-            else:
-                if raw.lower() not in {"auto", "poster", "lama"}:
-                    raise UserError("--inpaint chỉ nhận auto, poster hoặc lama.")
-                v4_options["inpaint"] = raw.lower()
+                if not 1 <= number <= 3:
+                    raise UserError("--ocr-passes phải từ 1 đến 3.")
+                v4_options["ocr_passes"] = number
+            v7_specific_option = True
+            index += 1
+        elif lowered == "--max-layers":
+            if index + 1 >= len(argv):
+                raise UserError(f"Thiếu giá trị sau {value}.")
+            raw = argv[index + 1]
+            try:
+                number = int(raw)
+            except ValueError as exc:
+                raise UserError(f"Giá trị không hợp lệ cho {value}: {raw}") from exc
+            if not 4 <= number <= 60:
+                raise UserError("--max-layers phải từ 4 đến 60.")
+            v4_options["max_layers"] = number
             v5_specific_option = True
+            index += 1
+        elif lowered == "--inpaint":
+            if index + 1 >= len(argv):
+                raise UserError(f"Thiếu giá trị sau {value}.")
+            raw = argv[index + 1].lower()
+            if raw not in {"auto", "poster", "lama", "opencv", "strict"}:
+                raise UserError("--inpaint chỉ nhận auto, poster, lama, opencv hoặc strict.")
+            v4_options["inpaint"] = raw
+            v5_v7_specific_option = True
             index += 1
         elif lowered in {"--width-mm", "--bleed-mm", "--profile-name"}:
             if index + 1 >= len(argv):
@@ -257,13 +318,31 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
     elif positional and positional[0].lower() in {"layers", "layer", "v5"}:
         mode = "V5_LAYERS"
         positional.pop(0)
+    elif positional and positional[0].lower() in {"repair", "v7"}:
+        mode = "V7_REPAIR"
+        positional.pop(0)
     elif positional and positional[0].lower() in {"fast", "v2"}:
         positional.pop(0)
 
     if mode not in {"V4_PRINT", "V4_VECTOR"} and v4_specific_option:
         raise UserError("--width-mm, --bleed-mm và --profile-name chỉ dùng với chế độ print/V4.")
     if mode != "V5_LAYERS" and v5_specific_option:
-        raise UserError("--max-layers, --inpaint và --no-semantic chỉ dùng với chế độ layers/V5.")
+        raise UserError("--max-layers và --no-semantic chỉ dùng với chế độ layers/V5.")
+    if mode not in {"V5_LAYERS", "V7_REPAIR"} and v5_v7_specific_option:
+        raise UserError("--inpaint chỉ dùng với chế độ layers/V5 hoặc repair/V7.")
+    if mode != "V7_REPAIR" and v7_specific_option:
+        raise UserError(
+            "--review, --review-file, --ocr-passes và --no-language-model chỉ dùng với repair/V7."
+        )
+    if mode == "V5_LAYERS" and v4_options["inpaint"] not in {"auto", "poster", "lama"}:
+        raise UserError("V5 --inpaint chỉ nhận auto, poster hoặc lama.")
+    if mode == "V7_REPAIR" and v4_options["inpaint"] not in {
+        "auto",
+        "poster",
+        "opencv",
+        "strict",
+    }:
+        raise UserError("V7 --inpaint chỉ nhận auto, poster, opencv hoặc strict.")
 
     if len(positional) != 2:
         raise UserError("Sai cú pháp. Gõ .\\upscale để xem ví dụ.")
@@ -272,7 +351,9 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
         scale = float(scale_token.replace(",", "."))
     except ValueError as exc:
         raise UserError(f"Hệ số không hợp lệ: {scale_token}") from exc
-    minimum_scale = 1.0 if mode == "V5_LAYERS" else MIN_SCALE
+    minimum_scale = 1.0 if mode in {"V5_LAYERS", "V7_REPAIR"} else MIN_SCALE
+    if mode == "V7_REPAIR" and 1.0 < scale < 2.0:
+        raise UserError("V7 nhận x1 hoặc từ x2 đến x20; khoảng giữa x1 và x2 không dùng V3.")
     if not (minimum_scale <= scale <= MAX_SCALE):
         raise UserError(
             f"Hệ số phải từ x{minimum_scale:g} đến x{MAX_SCALE:g}. "
@@ -351,6 +432,112 @@ def collect_batch_images(directory: Path) -> list[Path]:
 def safe_folder_name(value: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*]+', "_", value).strip(" .")
     return cleaned or "BATCH"
+
+
+def canonical_path_identity(path: Path) -> str:
+    """Return a stable Windows path identity without reading file contents."""
+
+    canonical = os.path.normcase(str(Path(path).resolve())).replace("\\", "/")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _same_canonical_path(raw: object, expected: Path) -> bool:
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        return canonical_path_identity(Path(raw)) == canonical_path_identity(expected)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _read_bundle_manifest(bundle: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _v7_bundle_owned_by(
+    bundle: Path,
+    source: Path,
+    *,
+    batch_root: Path | None,
+) -> bool:
+    manifest = _read_bundle_manifest(bundle)
+    if manifest is None or not _same_canonical_path(manifest.get("original_source"), source):
+        return False
+    if batch_root is not None and not _same_canonical_path(manifest.get("batch_root"), batch_root):
+        return False
+    return True
+
+
+def select_v7_target_directory(
+    relative_dir: Path,
+    result_stem: str,
+    tag: str,
+    source: Path,
+    *,
+    batch_root: Path | None,
+) -> Path:
+    """Reuse a legacy readable name only when its manifest proves ownership."""
+
+    parent = OUTPUT_DIR / "V7_REPAIR" / relative_dir
+    legacy = parent / f"{result_stem}_V7_REPAIR_x{tag}"
+    if not legacy.exists() or _v7_bundle_owned_by(legacy, source, batch_root=batch_root):
+        return legacy
+    suffix = canonical_path_identity(source)[:10]
+    collision_safe = parent / f"{bounded_output_stem(f'{result_stem}_{suffix}')}_V7_REPAIR_x{tag}"
+    if collision_safe.exists() and not _v7_bundle_owned_by(
+        collision_safe,
+        source,
+        batch_root=batch_root,
+    ):
+        raise UserError(
+            f"Output V7 đã tồn tại nhưng thuộc nguồn khác hoặc thiếu manifest: {collision_safe}"
+        )
+    return collision_safe
+
+
+def select_v7_batch_group(directory: Path, tag: str) -> Path:
+    """Keep equally named source folders in separate, deterministic output groups."""
+
+    base_name = f"{safe_folder_name(directory.name)}_x{tag}"
+    legacy = OUTPUT_DIR / "V7_REPAIR" / base_name
+    if not legacy.exists():
+        return Path(base_name)
+    manifests = [
+        value
+        for path in legacy.rglob("manifest.json")
+        if (value := _read_bundle_manifest(path.parent)) is not None
+    ]
+    if manifests and all(_same_canonical_path(value.get("batch_root"), directory) for value in manifests):
+        return Path(base_name)
+    safe_name = f"{base_name}_{canonical_path_identity(directory)[:10]}"
+    safe_group = OUTPUT_DIR / "V7_REPAIR" / safe_name
+    if safe_group.exists():
+        safe_manifests = [
+            value
+            for path in safe_group.rglob("manifest.json")
+            if (value := _read_bundle_manifest(path.parent)) is not None
+        ]
+        if not safe_manifests or not all(
+            _same_canonical_path(value.get("batch_root"), directory) for value in safe_manifests
+        ):
+            raise UserError(
+                f"Nhóm output V7 đã tồn tại nhưng không chứng minh đúng thư mục nguồn: {safe_group}"
+            )
+    return Path(safe_name)
+
+
+def bounded_output_stem(value: str, maximum: int = 44) -> str:
+    """Keep nested atomic bundle paths below legacy Windows MAX_PATH limits."""
+
+    cleaned = safe_folder_name(value)
+    if len(cleaned) <= maximum:
+        return cleaned
+    suffix = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:8]
+    return f"{cleaned[: maximum - 9]}_{suffix}"
 
 
 def batch_entries(directory: Path, images: list[Path]) -> list[tuple[Path, Path, str]]:
@@ -692,6 +879,51 @@ def validate_v5_resource_plan(
         "estimated_peak_ram_gib": round(estimated_peak_ram / 1024**3, 2),
         "estimated_working_disk_gib": round(estimated_disk / 1024**3, 2),
         "minimum_working_disk_gib": round(minimum_disk_before_segmentation / 1024**3, 2),
+    }
+
+
+def validate_v7_resource_plan(
+    source_size: tuple[int, int],
+    final_size: tuple[int, int],
+    *,
+    allow_huge: bool,
+) -> dict[str, float]:
+    """Bound OCR variants, clean master, masks and final print raster together."""
+
+    source_pixels = source_size[0] * source_size[1]
+    output_pixels = final_size[0] * final_size[1]
+    source_mp = source_pixels / 1_000_000
+    output_mp = output_pixels / 1_000_000
+    if source_mp > V4_HARD_SOURCE_MEGAPIXELS or output_mp > V7_HARD_OUTPUT_MEGAPIXELS:
+        raise UserError(
+            "Kế hoạch V7 vượt giới hạn phục dựng an toàn cứng "
+            f"({source_mp:.1f} MP nguồn, {output_mp:.1f} MP đầu ra; "
+            f"tối đa {V7_HARD_OUTPUT_MEGAPIXELS:g} MP đầu ra)."
+        )
+    estimated_peak_ram = source_pixels * 150 + output_pixels * 24 + 4 * 1024**3
+    estimated_disk = source_pixels * 30 + output_pixels * 14 + 1024**3
+    if output_mp > V7_SOFT_OUTPUT_MEGAPIXELS and not allow_huge:
+        raise UserError(
+            f"V7 sẽ tạo ảnh {final_size[0]}x{final_size[1]} ({output_mp:.1f} MP). "
+            "Hãy kiểm tra khổ in rồi thêm --allow-huge nếu thật sự cần."
+        )
+    free_disk = shutil.disk_usage(APP_DIR).free
+    if estimated_disk > free_disk * 0.8:
+        raise UserError(
+            f"Không đủ dung lượng làm việc cho V7: ước tính {estimated_disk / 1024**3:.2f} GiB, "
+            f"hiện trống {free_disk / 1024**3:.2f} GiB."
+        )
+    free_ram = available_physical_memory()
+    if free_ram is not None and estimated_peak_ram > free_ram * 0.85:
+        raise UserError(
+            f"Không đủ RAM khả dụng cho V7: ước tính {estimated_peak_ram / 1024**3:.2f} GiB, "
+            f"hiện khả dụng {free_ram / 1024**3:.2f} GiB."
+        )
+    return {
+        "source_megapixels": round(source_mp, 3),
+        "output_megapixels": round(output_mp, 3),
+        "estimated_peak_ram_gib": round(estimated_peak_ram / 1024**3, 2),
+        "estimated_working_disk_gib": round(estimated_disk / 1024**3, 2),
     }
 
 
@@ -1079,21 +1311,127 @@ def write_json_atomic(data: dict, target: Path) -> None:
     os.replace(temporary, target)
 
 
+DIRECTORY_PUBLISH_SCHEMA = "local-print-image-upscaler/directory-publish/1"
+
+
+def _directory_publish_journal(target: Path) -> Path:
+    return target.parent / f".{target.name}.publish.json"
+
+
+def _validated_publish_backup(target: Path, raw: object) -> Path:
+    if not isinstance(raw, str) or not raw:
+        raise RuntimeError("Directory publish journal has no backup path.")
+    backup = Path(raw).resolve()
+    parent = target.parent.resolve()
+    if backup.parent != parent or not re.fullmatch(
+        rf"\.{re.escape(target.name)}\.old-[0-9a-f]{{32}}",
+        backup.name,
+    ):
+        raise RuntimeError("Directory publish journal points outside its target namespace.")
+    return backup
+
+
+def recover_interrupted_directory_publish(target: Path) -> None:
+    """Recover only a target-specific, journaled interrupted directory swap."""
+
+    journal = _directory_publish_journal(target)
+    if not journal.exists():
+        return
+    try:
+        payload = json.loads(journal.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(f"Invalid directory publish journal: {journal}") from exc
+    if not isinstance(payload, dict) or payload.get("schema") != DIRECTORY_PUBLISH_SCHEMA:
+        raise RuntimeError(f"Invalid directory publish journal: {journal}")
+    if not _same_canonical_path(payload.get("target"), target):
+        raise RuntimeError(f"Directory publish journal belongs to another target: {journal}")
+    backup = _validated_publish_backup(target, payload.get("backup"))
+    phase = str(payload.get("phase", ""))
+
+    if target.exists():
+        if backup.exists():
+            if not backup.is_dir():
+                raise RuntimeError(f"Unsafe non-directory publish backup: {backup}")
+            try:
+                shutil.rmtree(backup)
+            except OSError as exc:
+                print(
+                    f"CẢNH BÁO: bundle chính đã an toàn; chưa dọn được backup {backup}: {exc}",
+                    file=sys.stderr,
+                )
+                return
+        journal.unlink(missing_ok=True)
+        return
+    if backup.exists():
+        if not backup.is_dir():
+            raise RuntimeError(f"Unsafe non-directory publish backup: {backup}")
+        os.replace(backup, target)
+        journal.unlink(missing_ok=True)
+        return
+    if phase == "prepared":
+        journal.unlink(missing_ok=True)
+        return
+    raise RuntimeError(
+        f"Ambiguous interrupted publish; target and verified backup are both missing: {journal}"
+    )
+
+
 def atomic_install_directory(source: Path, target: Path) -> None:
-    """Publish one validated V4 bundle while preserving the previous good bundle."""
+    """Publish a validated bundle with rollback and next-run crash recovery."""
+
     target.parent.mkdir(parents=True, exist_ok=True)
+    source = source.resolve()
+    target = target.resolve()
+    if not source.is_dir() or source.parent != target.parent:
+        raise RuntimeError("Directory publish source must be a staging directory beside its target.")
+    recover_interrupted_directory_publish(target)
     backup = target.with_name(f".{target.name}.old-{uuid.uuid4().hex}")
+    journal = _directory_publish_journal(target)
+    state: dict[str, object] = {
+        "schema": DIRECTORY_PUBLISH_SCHEMA,
+        "target": str(target),
+        "source": str(source),
+        "backup": str(backup),
+        "phase": "prepared",
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    write_json_atomic(state, journal)
     had_previous = target.exists()
     if had_previous:
         os.replace(target, backup)
+        state["phase"] = "old_moved"
+        try:
+            write_json_atomic(state, journal)
+        except BaseException:
+            if backup.exists() and not target.exists():
+                os.replace(backup, target)
+            journal.unlink(missing_ok=True)
+            raise
     try:
         os.replace(source, target)
     except BaseException:
         if had_previous and backup.exists() and not target.exists():
             os.replace(backup, target)
+        journal.unlink(missing_ok=True)
         raise
+    state["phase"] = "published"
+    try:
+        write_json_atomic(state, journal)
+    except OSError as exc:
+        print(
+            f"CẢNH BÁO: bundle đã publish; chưa cập nhật được journal {journal}: {exc}",
+            file=sys.stderr,
+        )
     if backup.exists():
-        shutil.rmtree(backup)
+        try:
+            shutil.rmtree(backup)
+        except OSError as exc:
+            print(
+                f"CẢNH BÁO: bundle mới đã publish; backup sẽ được dọn ở lượt sau {backup}: {exc}",
+                file=sys.stderr,
+            )
+            return
+    journal.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
@@ -1435,6 +1773,7 @@ def run_v5_job(
                     "launcher_app_version": APP_VERSION,
                     "original_source": str(source),
                     "original_source_sha256": sha256_file(source),
+                    "source_path_identity_sha256": canonical_path_identity(source),
                     "normalized_stage_sha256": normalized_sha,
                     "launcher_master": master_info,
                     "resource_plan": resource_plan,
@@ -1444,10 +1783,17 @@ def run_v5_job(
             )
             if batch_root is not None:
                 metadata["batch_root"] = str(batch_root)
+                metadata["batch_root_path_identity_sha256"] = canonical_path_identity(batch_root)
                 metadata["batch_relative_source"] = str(source.relative_to(batch_root))
             write_json_atomic(metadata, engine_manifest_path)
             atomic_install_directory(staging_bundle, target_dir)
-            write_json_atomic(metadata, report_path)
+            try:
+                write_json_atomic(metadata, report_path)
+            except OSError as exc:
+                print(
+                    f"CẢNH BÁO: bundle đã publish; không ghi được bản sao manifest {report_path}: {exc}",
+                    file=sys.stderr,
+                )
     finally:
         if staging_bundle.exists():
             shutil.rmtree(staging_bundle)
@@ -1458,6 +1804,199 @@ def run_v5_job(
     print(f"  PSD chỉnh sửa : {next(target_dir.glob('*_EDITABLE.psd'), 'đã bỏ qua do giới hạn PSD')}")
     print(f"  ORA mở chuẩn  : {next(target_dir.glob('*_MASTER.ora'))}")
     print(f"  Thời gian     : {total_seconds:.1f} giây")
+    return target_dir
+
+
+def run_v7_job(
+    source: Path,
+    scale: float,
+    allow_huge: bool,
+    options: dict[str, object],
+    *,
+    output_subdir: Path | None = None,
+    output_stem: str | None = None,
+    batch_root: Path | None = None,
+) -> Path:
+    if not PYTHON_V7.is_file():
+        raise UserError(
+            f"Thiếu môi trường V7: {PYTHON_V7}. "
+            "Hãy chạy APP\\engines\\V7\\setup_v7.ps1 một lần."
+        )
+    if not V7_ENGINE.is_file():
+        raise UserError(f"Thiếu engine V7: {V7_ENGINE}")
+    source_size, source_mode, icc_profile = inspect_image(source)
+    final_size = tuple(int(round(value * scale)) for value in source_size)
+    resource_plan = validate_v7_resource_plan(
+        source_size,
+        final_size,
+        allow_huge=allow_huge,
+    )
+    relative_dir = output_subdir or Path()
+    result_stem = bounded_output_stem(output_stem or source.stem)
+    tag = scale_tag(scale)
+    target_dir = select_v7_target_directory(
+        relative_dir,
+        result_stem,
+        tag,
+        source,
+        batch_root=batch_root,
+    )
+    report_path = (
+        APP_DIR
+        / "manifests"
+        / "V7_REPAIR"
+        / relative_dir
+        / f"{target_dir.name}.json"
+    )
+    review_mode = str(options.get("review", "gui"))
+    review_file_raw = options.get("review_file")
+    review_file: Path | None = None
+    if review_file_raw:
+        review_file = Path(str(review_file_raw)).expanduser().resolve()
+        if not review_file.is_file():
+            raise UserError(f"Không tìm thấy file duyệt V7: {review_file}")
+    prior_batch_review: Path | None = None
+    if batch_root is not None and review_file is None and target_dir.exists():
+        prior_batch_review = target_dir / "TEXT_REVIEW.json"
+        if not prior_batch_review.is_file() or _read_bundle_manifest(target_dir) is None:
+            raise UserError(
+                f"Bundle V7 batch cũ thiếu review/manifest; giữ nguyên và không ghi đè: {target_dir}"
+            )
+        try:
+            prior_review_data = json.loads(prior_batch_review.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise UserError(f"TEXT_REVIEW.json cũ bị hỏng; không ghi đè: {prior_batch_review}") from exc
+        if not isinstance(prior_review_data, dict) or not isinstance(
+            prior_review_data.get("regions"), list
+        ):
+            raise UserError(f"TEXT_REVIEW.json cũ sai cấu trúc; không ghi đè: {prior_batch_review}")
+    tessdata_dir = (
+        V7_TESSDATA
+        if (V7_TESSDATA / "vie.traineddata").is_file()
+        else APP_DIR / "engines" / "V5" / "models" / "tessdata"
+    )
+
+    print("\nTHÔNG TIN LỆNH")
+    print("  Chế độ : V7 DESIGN REPAIR (OCR đối chứng + duyệt + gỡ/vẽ lại chữ)")
+    print(f"  Input  : {source}")
+    print(f"  Nguồn  : {source_size[0]}x{source_size[1]} px, {source_mode}")
+    print(
+        f"  Đích   : {final_size[0]}x{final_size[1]} px "
+        f"({resource_plan['output_megapixels']:.1f} MP)"
+    )
+    print(f"  Duyệt  : {review_mode}{' + file đã duyệt' if review_file else ''}")
+    if prior_batch_review is not None:
+        print(f"  Review : tự nạp an toàn từ {prior_batch_review}")
+    print(
+        "  Tài nguyên ước tính bảo thủ: "
+        f"{resource_plan['estimated_peak_ram_gib']:.2f} GiB RAM, "
+        f"{resource_plan['estimated_working_disk_gib']:.2f} GiB ổ tạm"
+    )
+    print(f"  Output : {target_dir}\n", flush=True)
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_bundle = target_dir.parent / f".{target_dir.name}.new-{uuid.uuid4().hex}"
+    started = time.perf_counter()
+    try:
+        with tempfile.TemporaryDirectory(prefix="job_v7_", dir=WORK_DIR) as temporary_raw:
+            job_dir = Path(temporary_raw)
+            staged_input = stage_input(source, job_dir, icc_profile)
+            normalized_sha = canonical_pixel_sha256(staged_input)
+            effective_review_file = review_file
+            if prior_batch_review is not None:
+                review_snapshot = job_dir / "previous_TEXT_REVIEW.json"
+                shutil.copy2(prior_batch_review, review_snapshot)
+                effective_review_file = review_snapshot
+            command = [
+                str(PYTHON_V7),
+                "-B",
+                str(V7_ENGINE),
+                str(staged_input),
+                f"{scale:g}",
+                str(staging_bundle),
+                "--name",
+                result_stem,
+                "--models-root",
+                str(V7_MODELS),
+                "--tessdata-dir",
+                str(tessdata_dir),
+                "--review-mode",
+                review_mode,
+                "--ocr-passes",
+                str(int(options.get("ocr_passes", 3))),
+                "--inpaint",
+                str(options.get("inpaint", "auto")),
+                "--v3-python",
+                str(PYTHON),
+                "--v3-engine",
+                str(V3_ENGINE),
+                "--language-python",
+                str(PYTHON),
+                "--app-version",
+                APP_VERSION,
+            ]
+            if effective_review_file is not None:
+                command.extend(["--review-file", str(effective_review_file)])
+            if not bool(options.get("language_model", True)):
+                command.append("--no-language-model")
+            subprocess.run(command, check=True, cwd=ROOT_DIR)
+
+            engine_manifest_path = staging_bundle / "manifest.json"
+            if not engine_manifest_path.is_file():
+                raise RuntimeError("V7 không tạo manifest kiểm định.")
+            metadata = json.loads(engine_manifest_path.read_text(encoding="utf-8"))
+            if metadata.get("pipeline") != "V7_DESIGN_REPAIR":
+                raise RuntimeError("Manifest V7 sai pipeline.")
+            if metadata.get("final_size") != list(final_size):
+                raise RuntimeError("Manifest V7 sai kích thước đầu ra.")
+            if metadata.get("status") not in {"PASS", "REVIEW_REQUIRED", "FAILED_QA"}:
+                raise RuntimeError("Manifest V7 thiếu trạng thái QA rõ ràng.")
+            required_patterns = ("*_REPAIRED_x*.png", "TEXT_REVIEW.json", "QA.json")
+            for pattern in required_patterns:
+                if not any(staging_bundle.glob(pattern)):
+                    raise RuntimeError(f"V7 thiếu đầu ra bắt buộc: {pattern}")
+            metadata.update(
+                {
+                    "launcher": "Local Print Image Upscaler unified command",
+                    "launcher_app_version": APP_VERSION,
+                    "original_source": str(source),
+                    "original_source_sha256": sha256_file(source),
+                    "source_path_identity_sha256": canonical_path_identity(source),
+                    "normalized_stage_sha256": normalized_sha,
+                    "resource_plan": resource_plan,
+                    "final_bundle": str(target_dir),
+                    "launcher_total_seconds": round(time.perf_counter() - started, 3),
+                }
+            )
+            if batch_root is not None:
+                metadata["batch_root"] = str(batch_root)
+                metadata["batch_root_path_identity_sha256"] = canonical_path_identity(batch_root)
+                metadata["batch_relative_source"] = str(source.relative_to(batch_root))
+            write_json_atomic(metadata, engine_manifest_path)
+            atomic_install_directory(staging_bundle, target_dir)
+            try:
+                write_json_atomic(metadata, report_path)
+            except OSError as exc:
+                print(
+                    f"CẢNH BÁO: bundle đã publish; không ghi được bản sao manifest {report_path}: {exc}",
+                    file=sys.stderr,
+                )
+    finally:
+        if staging_bundle.exists():
+            shutil.rmtree(staging_bundle)
+
+    total_seconds = time.perf_counter() - started
+    manifest = json.loads((target_dir / "manifest.json").read_text(encoding="utf-8"))
+    print("\nHOÀN TẤT V7")
+    print(f"  Trạng thái    : {manifest['status']}")
+    print(f"  Ảnh phục dựng : {next(target_dir.glob('*_REPAIRED_x*.png'))}")
+    print(f"  File duyệt    : {target_dir / 'TEXT_REVIEW.json'}")
+    print(f"  Báo cáo QA    : {target_dir / 'QA.json'}")
+    print(f"  Thời gian     : {total_seconds:.1f} giây")
+    if manifest["status"] != "PASS":
+        print("  Lưu ý         : chưa được gọi là bản giao in; xem TEXT_REVIEW.json và QA.json.")
+    elif int(manifest.get("qa", {}).get("ocr_advisory_count", 0)) > 0:
+        print("  Lưu ý         : QA cứng đạt; OCR đọc ngược còn cảnh báo dấu. Xem BEFORE_AFTER.png.")
     return target_dir
 
 
@@ -1472,6 +2011,16 @@ def run_job(
     output_stem: str | None = None,
     batch_root: Path | None = None,
 ) -> Path:
+    if mode == "V7_REPAIR":
+        return run_v7_job(
+            source,
+            scale,
+            allow_huge,
+            v4_options or {},
+            output_subdir=output_subdir,
+            output_stem=output_stem,
+            batch_root=batch_root,
+        )
     if mode == "V5_LAYERS":
         return run_v5_job(
             source,
@@ -1604,7 +2153,18 @@ def run_batch(
     allow_huge: bool,
     v4_options: dict[str, object],
 ) -> int:
-    if mode == "V5_LAYERS":
+    if mode == "V7_REPAIR":
+        if not PYTHON_V7.is_file() or not V7_ENGINE.is_file():
+            raise UserError("Thiếu Python hoặc engine V7; batch chưa thể chạy.")
+        if v4_options.get("review_file"):
+            raise UserError(
+                "--review-file chỉ áp dụng cho một ảnh. Với thư mục, chạy lượt đầu "
+                "--review defer rồi duyệt từng TEXT_REVIEW.json."
+            )
+        if v4_options.get("review") == "gui":
+            v4_options = dict(v4_options)
+            v4_options["review"] = "defer"
+    elif mode == "V5_LAYERS":
         if not PYTHON_V5.is_file() or not V5_ENGINE.is_file():
             raise UserError("Thiếu Python CUDA hoặc engine V5; batch chưa thể chạy.")
     elif mode in {"V4_PRINT", "V4_VECTOR"}:
@@ -1614,7 +2174,11 @@ def run_batch(
         raise UserError("Thiếu Python hoặc engine V2/V3 trong APP; batch chưa thể chạy.")
     images = collect_batch_images(directory)
     tag = scale_tag(scale)
-    batch_group = Path(f"{safe_folder_name(directory.name)}_x{tag}")
+    batch_group = (
+        select_v7_batch_group(directory, tag)
+        if mode == "V7_REPAIR"
+        else Path(f"{safe_folder_name(directory.name)}_x{tag}")
+    )
     entries = batch_entries(directory, images)
     batch_output = OUTPUT_DIR / mode / batch_group
     succeeded: list[Path] = []

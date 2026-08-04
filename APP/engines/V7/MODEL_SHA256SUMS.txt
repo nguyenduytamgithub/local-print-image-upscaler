@@ -1,0 +1,21 @@
+# PP-OCRv6 medium official inference assets, downloaded from Paddle model ecology.
+0F1A7EC35DA36173529C7A60238B7F7919E3831929C3F700AD90AD4896ADECD5  paddlex/official_models/PP-OCRv6_medium_det/inference.json
+85218D2E3D98F5A21C58B4220627BE923A97AEE5DB3CC71F39536AB31AC53960  paddlex/official_models/PP-OCRv6_medium_det/inference.pdiparams
+7298D5EAD546584AF2504D03355F881AC7A7BC0EB1E282D3E159277C1D0AF871  paddlex/official_models/PP-OCRv6_medium_det/inference.yml
+0B2E25E990BD072F1BF77D59D67D508BCE6C4BD44AF6624E0FB27D6DA2CD00E8  paddlex/official_models/PP-OCRv6_medium_rec/inference.json
+1B01C79A914587933F615569E75DE54F2E638EBB5D3F3B3C1B38C24EDE8C7319  paddlex/official_models/PP-OCRv6_medium_rec/inference.pdiparams
+991B700FACF5B50A7DE193468207D5F4255B538DDE0D312AE3B7C7A9B6873129  paddlex/official_models/PP-OCRv6_medium_rec/inference.yml
+
+# Paths are relative to APP/engines/V7/models. The full immutable Hugging Face
+# snapshot path is intentional: a floating friendly alias is not auditable.
+# nrl-ai/vn-spell-correction-base, revision 61596a71696ba360ae828f9db3806610afedf6d3.
+FFD95F81F1665BD7DBA68BCCB1CC88F10787F9ABE355AF8A373F2D0F2EAC5430  huggingface/models--nrl-ai--vn-spell-correction-base/snapshots/61596a71696ba360ae828f9db3806610afedf6d3/config.json
+EAAF16B98E47131E3CE155054140429E36C4ED6A23C6FF32C2946EF66CE121FF  huggingface/models--nrl-ai--vn-spell-correction-base/snapshots/61596a71696ba360ae828f9db3806610afedf6d3/generation_config.json
+4275C526688289D06A054FD911D3ECEBDAD4A790707A371CF67A511F2251524C  huggingface/models--nrl-ai--vn-spell-correction-base/snapshots/61596a71696ba360ae828f9db3806610afedf6d3/model.safetensors
+1BF246679A41F9204EF9085D6EBE314CB3EC1C916DB54E2A3BE6E49C9C839453  huggingface/models--nrl-ai--vn-spell-correction-base/snapshots/61596a71696ba360ae828f9db3806610afedf6d3/special_tokens_map.json
+59986B62F9F0B90EDAFB9B073EA7B93D21114A5841219A1EA2399ADE73F729C6  huggingface/models--nrl-ai--vn-spell-correction-base/snapshots/61596a71696ba360ae828f9db3806610afedf6d3/spiece.model
+637FB80D3A85EC307EFEA089E10A42E1FA22FDBD19ABE612E38CB771B78DE8FD  huggingface/models--nrl-ai--vn-spell-correction-base/snapshots/61596a71696ba360ae828f9db3806610afedf6d3/tokenizer.json
+10FE5AEBB65886903DB4DDB439D2192E28FC44DB7CD87F988377A5D3F913CB97  huggingface/models--nrl-ai--vn-spell-correction-base/snapshots/61596a71696ba360ae828f9db3806610afedf6d3/tokenizer_config.json
+
+# tesseract-ocr/tessdata_best, revision e2aad9b983032bb1beff9133104a67cdbb87ca4d.
+B6B49293D95D0B6DBD8780174627E82C75BE957B6F4ED9862155540D6B00BB45  tessdata/vie.traineddata

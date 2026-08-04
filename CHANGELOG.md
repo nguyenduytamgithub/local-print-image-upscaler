@@ -3,6 +3,47 @@
 Các thay đổi đáng chú ý của Local Print Image Upscaler được ghi tại đây. Dự án dùng
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-04
+
+### Added
+
+- Thêm `upscale repair` (V7 Design Repair) cho poster/catalogue có chữ gãy, mờ, thiếu dấu hoặc cần
+  sửa chính tả; hỗ trợ một ảnh hoặc batch thư mục, với `n=1` hay `n=2..20`.
+- Thêm OCR đối chứng đa lượt bằng PP-OCRv6 medium và Tesseract tiếng Việt. Kết quả OCR chỉ là bằng
+  chứng; giá, số điện thoại, địa chỉ, mã hàng, chữ số và trường nhạy cảm không được âm thầm sửa.
+- Siết gate OCR theo từng engine độc lập: augmentation PP-OCRv6 không được cộng thành nhiều phiếu;
+  thiếu `vie.traineddata` thì Tesseract không bỏ phiếu và không fallback English dưới nhãn tiếng Việt.
+- Thêm model tiếng Việt cục bộ `nrl-ai/vn-spell-correction-base` đã khóa revision để tạo đề xuất
+  chính tả. Đề xuất không được tự áp dụng và có thể tắt hoàn toàn bằng `--no-language-model`.
+- Thêm quy trình duyệt bằng cửa sổ Windows hoặc `TEXT_REVIEW.json`: người dùng có thể nhập chữ đúng,
+  giữ nguyên vùng ảnh hoặc để vùng chưa chắc chắn ở trạng thái chờ. Hồ sơ duyệt bắt buộc SHA-256 nguồn
+  cùng fingerprint bbox + NFC OCR text; `strict` không tự duyệt cả vùng xanh.
+- Thêm mask/gate nét chữ cũ, tái tạo nền có giới hạn theo từng footprint đã duyệt và kiểm tra pixel ngoài
+  ROI không đổi. Nền vốn bị che luôn được khai báo là phần tổng hợp, không gọi là pixel gốc khôi phục.
+- Thêm render chữ Unicode NFC bằng font Windows thật trực tiếp ở kích thước cuối, kiểm tra coverage glyph,
+  quyền embedding OpenType và không chấp nhận ô ký tự thiếu glyph.
+- Thêm khớp hình học từ tight mask thay cho bbox OCR lỏng, dò font bằng RAQM/HarfBuzz và tối ưu trục
+  `wght`/`wdth` của OpenType Variable Font. PNG không bị kéo giãn chữ; SVG lưu lại các trục và baseline thật.
+- Khóa exact font face, trục variable và tỷ lệ font từ source gate sang final x2..x20; PASS yêu cầu cả
+  source geometry, final geometry và lock fidelity đạt.
+- Xuất bundle V7 gồm PNG repaired/clean base, SVG mixed raster/vector có đối tượng `<text>` chỉnh sửa được,
+  ảnh before/after, overlay, hồ sơ duyệt, QA và manifest có hash/trạng thái. Font Windows không được nhúng;
+  PNG repaired là bản tham chiếu vị trí khi máy khác thay font SVG.
+- Thêm QA cho chữ cũ còn sót, seam, clipping, Unicode đọc lại, hình học/tâm chữ, thay đổi ngoài ROI và tính tái lập. Bundle
+  chưa duyệt hoặc lỗi gate mang trạng thái `REVIEW_REQUIRED`/`FAILED_QA`, không tự nhận là bản giao in.
+- Thêm runtime OCR CPU V7 tách riêng, dependency lock, setup/check script và SHA-256 cho model PP-OCRv6
+  cùng model đề xuất tiếng Việt. Ảnh người dùng và model vẫn ở máy cục bộ, không đưa lên cloud/Git.
+
+### Changed
+
+- Phiên bản ứng dụng tăng lên `0.4.0`; V2/V3/V4/V5 được giữ nguyên và V7 dùng chung lệnh `upscale`.
+- V7 `n=1` không gọi V3 và không cần GPU. V7 `n=2..20` bắt buộc dùng V3 CUDA trên nền đã gỡ chữ,
+  sau đó vẽ lại chữ ở độ phân giải cuối.
+- Batch V7 tự snapshot/nạp review từng ảnh khi chạy lại; output trùng tên được tách theo định danh đường
+  dẫn và quy trình publish có journal/rollback để giữ bundle tốt trước đó khi có lỗi.
+- Tài liệu phân biệt V7 sửa chữ/nền và SVG text editable với V4 Print: V7 không xuất PDF/X-4, CMYK,
+  bleed hay khổ vật lý; bộ giao nhà in và preflight vẫn thuộc V4.
+
 ## [0.3.0] - 2026-08-04
 
 ### Added

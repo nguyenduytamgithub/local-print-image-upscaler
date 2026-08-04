@@ -19,6 +19,16 @@ checkpoints. Their copyrights and licenses remain with their respective authors.
 | OpenCV | <https://opencv.org/> | Apache-2.0 |
 | Pillow | <https://python-pillow.org/> | HPND |
 | NumPy | <https://numpy.org/> | BSD-3-Clause |
+| PaddlePaddle | <https://github.com/PaddlePaddle/Paddle> | Apache-2.0 |
+| PaddleOCR / PP-OCRv6 source | <https://github.com/PaddlePaddle/PaddleOCR> | Apache-2.0; model-asset terms/notices also apply |
+| PaddleX | <https://github.com/PaddlePaddle/PaddleX> | Apache-2.0 |
+| fontTools | <https://github.com/fonttools/fonttools> | MIT |
+| freetype-py | <https://github.com/rougier/freetype-py> | BSD-3-Clause |
+| HarfBuzz | <https://github.com/harfbuzz/harfbuzz> | Old MIT |
+| uharfbuzz | <https://github.com/harfbuzz/uharfbuzz> | Apache-2.0; bundled HarfBuzz notices remain applicable |
+| regex | <https://github.com/mrabarnett/mrab-regex> | Apache-2.0 additions plus inherited CNRI/Python terms |
+| SciPy | <https://github.com/scipy/scipy> | BSD-3-Clause; binary-wheel subcomponent notices apply |
+| scikit-image | <https://github.com/scikit-image/scikit-image> | BSD-3-Clause with file-specific BSD-2-Clause/MIT notices |
 | uv | <https://github.com/astral-sh/uv> | MIT OR Apache-2.0 |
 | SAM 2.1 | <https://github.com/facebookresearch/sam2> | Apache-2.0 |
 | Grounding DINO | <https://github.com/IDEA-Research/GroundingDINO> | Apache-2.0 |
@@ -28,6 +38,7 @@ checkpoints. Their copyrights and licenses remain with their respective authors.
 | UB Mannheim Windows build of Tesseract | <https://tesseract-ocr.github.io/tessdoc/Installation.html> | Tesseract distribution; component notices remain applicable |
 | Tesseract `tessdata_best` Vietnamese model | <https://github.com/tesseract-ocr/tessdata_best> | Apache-2.0 |
 | Transformers | <https://github.com/huggingface/transformers> | Apache-2.0 |
+| `nrl-ai/vn-spell-correction-base` | <https://huggingface.co/nrl-ai/vn-spell-correction-base> | Apache-2.0 as declared by the upstream model card |
 | psd-tools | <https://github.com/psd-tools/psd-tools> | MIT |
 | OpenRaster | <https://www.openraster.org/> | Open specification; implementations retain their own licenses |
 
@@ -37,6 +48,8 @@ Retained license texts and source/license records for the local engines are unde
 - `APP/engines/V3/THIRD_PARTY_LICENSES/`
 - `APP/engines/V5/SOURCES.md` records pinned SAM 2.1/Grounding DINO revisions, LaMa and
   Vietnamese OCR hashes, plus the PSD/OpenRaster format policy.
+- `APP/engines/V7/SOURCES.md` records the PP-OCRv6 sources, Unicode/OpenType references and
+  the exact Vietnamese proposal-model revision; `MODEL_SHA256SUMS.txt` records downloaded assets.
 
 The complete Apache-2.0 text used by the Apache-licensed V5 sources is retained at
 `APP/engines/V3/THIRD_PARTY_LICENSES/HAT_APACHE-2.0.txt`; V5 source-specific attribution is
@@ -56,6 +69,18 @@ second restoration pass. The Apache-2.0 license listed for the HAT source reposi
 not by itself replace any separate notice or redistribution term attached to a pretrained
 checkpoint; release packaging must verify both.
 
+V7 downloads official PP-OCRv6 inference assets and a revision-pinned Vietnamese spelling
+proposal model during local setup. Repository licenses do not automatically settle every
+checkpoint or dataset redistribution question. Public releases must verify the terms attached
+to the exact downloaded artifacts and retain the package/model notices. The language model is
+used only for review proposals; this usage policy does not alter its upstream license.
+
+The V7 virtual environment is machine-local and excluded from Git. Installed wheels retain
+their own `.dist-info` license files, including notices for binary dependencies bundled by
+SciPy, scikit-image, Pillow/FreeType/HarfBuzz and Paddle packages. If a release redistributes
+that environment or any wheel, it must include all corresponding license files rather than
+relying on this summary table alone.
+
 The source repository does not redistribute G'MIC, PyTorch, model checkpoints, resvg,
-Scribus, or other third-party binaries. An installer must fetch them from official sources,
-verify expected versions/hashes and retain all required notices.
+Scribus, Paddle runtimes or other third-party binaries. An installer must fetch them from
+official sources, verify expected versions/hashes and retain all required notices.

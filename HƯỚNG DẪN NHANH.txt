@@ -1,0 +1,143 @@
+HƯỚNG DẪN NHANH — LOCAL PRINT IMAGE UPSCALER V2/V3/V4/V5/V7
+===================================================================
+
+1. BỎ ẢNH GỐC VÀO THƯ MỤC:
+
+   C:\Users\Admin\Desktop\RESIZE\INPUT
+
+
+2. MỞ POWERSHELL VÀ ĐỨNG ĐÚNG THƯ MỤC:
+
+   cd "C:\Users\Admin\Desktop\RESIZE"
+
+
+3. CHỌN ĐÚNG PHIÊN BẢN CẦN DÙNG:
+
+V2 — NHANH, XUẤT PNG
+
+   .\upscale test.png 4
+
+   Dùng khi: cần kết quả nhanh.
+   Nhận file tại: OUTPUT\V2_FAST
+
+
+V3 — AI CHẤT LƯỢNG CAO, XUẤT PNG
+
+   .\upscale high test.png 4
+
+   Dùng khi: cần PNG đẹp, sắc nét hơn để xem hoặc tiếp tục xử lý.
+   Cần GPU NVIDIA để tạo kết quả mới.
+   Nhận file tại: OUTPUT\V3_HIGH
+
+
+V4 — BỘ FILE GIAO NHÀ IN
+
+   .\upscale print test.png 4 --width-mm 3000
+
+   3000 nghĩa là khổ in rộng 3.000 mm, tức 3 mét.
+   Dùng khi: cần PDF/X-4 + SVG + PNG để giao nhà in.
+   Nhận bộ file tại: OUTPUT\V4_PRINT
+
+   Riêng logo hoặc hình mảng màu phẳng cần toàn vector:
+
+   .\upscale vector test.png 4 --width-mm 3000
+
+   Nhận bộ file tại: OUTPUT\V4_VECTOR
+
+
+V5 — TÁCH LAYER ĐỂ CHỈNH SỬA
+
+   .\upscale layers test.png 1
+
+   Dùng n=1 khi muốn file layer nhẹ để sửa trước.
+   Xuất PSD + ORA + ZIP layer/mask và các file xem trước.
+   Nhận bộ file tại: OUTPUT\V5_LAYERS
+
+   Nếu cần tài liệu layer lớn x4 ngay từ đầu:
+
+   .\upscale layers test.png 4
+
+
+V7 — SỬA CHỮ GÃY, MỜ, THIẾU DẤU HOẶC SAI CHÍNH TẢ
+
+   Cài một lần trước khi dùng V7:
+
+   powershell -ExecutionPolicy Bypass -File .\APP\engines\V7\setup_v7.ps1
+
+   .\upscale repair test.png 1
+
+   Dùng n=1 để sửa ở kích thước gốc; không cần GPU.
+   Mặc định chương trình mở cửa sổ cho bạn duyệt chữ không chắc chắn.
+   Chỉ vùng chữ đã duyệt mới bị gỡ/vẽ lại; nền dưới chữ là phần tái tạo có giới hạn.
+   Nhận bộ file tại: OUTPUT\V7_REPAIR
+
+   Nếu muốn sửa chữ và làm lớn x4 trong cùng lượt:
+
+   .\upscale repair test.png 4
+
+   V7 x2 đến x20 cần bộ V3 và GPU NVIDIA CUDA.
+   SVG V7 có chữ Unicode chỉnh sửa được, nhưng hình/nền vẫn là raster và font không được nhúng.
+   V7 tự khớp khung nét cũ và có thể dùng OpenType Variable Font để giữ đúng tỷ lệ chữ, không kéo giãn bitmap.
+   Font, độ đậm và độ rộng đã kiểm tra ở n=1 được khóa giữ nguyên tỷ lệ khi chạy n=4/n=10.
+   V7 không xuất PDF/X-4; muốn giao in vẫn dùng V4 sau khi đã sửa và duyệt xong.
+
+
+4. NHỚ NHANH ĐỂ KHÔNG NHẦM:
+
+   V2 = nhanh                  -> .\upscale
+   V3 = PNG AI đẹp            -> .\upscale high
+   V4 = giao nhà in           -> .\upscale print
+   V5 = tách và chỉnh layer   -> .\upscale layers
+   V7 = sửa chữ và nền quanh chữ -> .\upscale repair
+
+
+5. CHẠY TOÀN BỘ ẢNH TRONG MỘT THƯ MỤC:
+
+Thay tên ảnh bằng đường dẫn thư mục. Tất cả ảnh dùng chung một hệ số n.
+
+   V2: .\upscale "D:\BO ANH" 4
+   V3: .\upscale high "D:\BO ANH" 4
+   V4: .\upscale print "D:\BO ANH" 4 --width-mm 3000
+   V5: .\upscale layers "D:\BO ANH" 1
+   V7: .\upscale repair "D:\BO ANH" 1 --review defer
+
+V7 chạy thư mục sẽ ghi TEXT_REVIEW.json riêng cho từng ảnh, không mở hàng loạt cửa sổ.
+Sau khi sửa/duyệt các JSON, chạy lại đúng lệnh thư mục; V7 tự nạp review đúng của từng ảnh:
+
+   .\upscale repair "D:\BO ANH" 1 --review defer
+
+Nếu chỉ duyệt một file, chạy lại đúng ảnh gốc:
+
+   .\upscale repair test.png 1 --review-file "D:\DUONG_DAN\TEXT_REVIEW.json"
+
+Muốn bắt buộc tự duyệt mọi vùng, kể cả vùng OCR xanh:
+
+   .\upscale repair test.png 1 --review strict --review-file "D:\DUONG_DAN\TEXT_REVIEW.json"
+
+
+6. Ý NGHĨA CỦA n:
+
+   n=4: chiều rộng và chiều cao đều lớn gấp 4 lần.
+   n=10: chiều rộng và chiều cao đều lớn gấp 10 lần.
+
+   V2/V3/V4 nhận n từ 2 đến 20.
+   V5 nhận n từ 1 đến 20; nên dùng n=1 để sửa layer nhẹ hoặc n=4 để có layer lớn.
+   V7 nhận n=1 hoặc n từ 2 đến 20: n=1 không cần GPU; n>=2 cần V3 CUDA.
+
+
+VÍ DỤ TÊN FILE CÓ KHOẢNG TRẮNG:
+
+   .\upscale high "bảng quảng cáo.png" 4
+
+
+LƯU Ý:
+
+   - Chương trình không sửa hoặc xóa ảnh gốc trong INPUT.
+   - Không nên dùng n=100 vì ảnh sẽ quá lớn, rất nặng và khó mở.
+   - V5 là file trung gian để sửa layer; sau khi sửa xong, xuất ảnh ghép rồi dùng
+     V3 hoặc V4 nếu cần làm lớn/giao in.
+   - V7 chỉ sửa các vùng chữ được duyệt và nền trong footprint tương ứng. Nó không tự
+     phục dựng mọi hình minh họa, không bảo đảm đoán đúng chi tiết đã mất và không thay V4.
+   - Quy trình giao in nên dùng: V7 n=1 -> duyệt file REPAIRED -> V4 print với khổ mm/ICC.
+   - Nếu bundle V7 ghi REVIEW_REQUIRED hoặc FAILED_QA thì chưa được coi là file giao in.
+   - Khi nhà in cung cấp ICC profile riêng, hãy dùng đúng profile của họ cho bản in.

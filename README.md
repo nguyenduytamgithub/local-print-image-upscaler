@@ -1,9 +1,9 @@
-# Local Print Image Upscaler — V2/V3/V4 Print và V5 Smart Layers
+# Local Print Image Upscaler — V2/V3/V4/V5/V7
 
 Chương trình xử lý ảnh cục bộ trên Windows cho bảng hiệu, poster và file in khổ lớn.
 Ảnh nguồn không được gửi lên dịch vụ đám mây.
 
-## Năm chế độ
+## Sáu chế độ
 
 | Chế độ | Đầu ra chính | Khi nên dùng |
 |---|---|---|
@@ -12,6 +12,7 @@ Chương trình xử lý ảnh cục bộ trên Windows cho bảng hiệu, poste
 | **V4 Print** | Raster AI/USM đã qua ablation + SVG/PDF/X-4 + PNG | Bản in nghiêm túc, cần phục hồi đồng đều toàn ảnh bằng NVIDIA CUDA |
 | **V4 Vector** | SVG/PDF/X-4 toàn path | Logo, chữ, mảng màu phẳng; không dùng cho ảnh chụp/gradient |
 | **V5 Smart Layers** | OpenRaster + PNG/mask ZIP; PSD khi trong giới hạn | Tách ảnh phẳng thành số lượng layer raster hữu ích để sửa trong Photoshop/Krita/Photopea/Canva |
+| **V7 Design Repair** | PNG đã sửa chữ + SVG có chữ Unicode chỉnh sửa được + hồ sơ duyệt/QA | Poster/catalogue có chữ gãy, mờ, thiếu dấu hoặc sai chính tả cần người dùng xác nhận |
 
 V5 là engine độc lập và không xóa V2/V3/V4. Nó dùng SAM 2.1 để tìm vùng, tự phân luồng
 poster/đồ họa với ảnh tự nhiên nhiều texture, rồi gộp theo panel, hàng, màu, hình học và quan hệ
@@ -19,6 +20,24 @@ cha–con trong giới hạn số layer. Grounding DINO chỉ cung cấp nhãn g
 `tessdata_best` tiếng Việt đã pin cung cấp vùng/dòng OCR khi máy có Tesseract 5.
 Nền phía dưới vật thể được tái tạo nhưng luôn ghi rõ là **synthesized**: ảnh phẳng không chứa
 pixel vốn bị che, nên không thuật toán nào chứng minh được nền gốc chính xác.
+
+V7 không phải một preset làm nét toàn ảnh. Nó dùng PP-OCRv6 và Tesseract làm các nguồn đọc đối chứng,
+đưa thay đổi nội dung cho người dùng duyệt, chỉ gỡ nét chữ đã được chấp thuận, dựng lại nền trong đúng
+footprint đó rồi vẽ lại chữ Unicode bằng font thật ở kích thước cuối. Giá, số điện thoại, địa chỉ, mã hàng
+và mọi đề xuất sửa chính tả không được âm thầm thay đổi. PNG đã sửa là bản tham chiếu vị trí raster;
+SVG là tài liệu **mixed raster/vector** có đối tượng `<text>` thật để sửa, nhưng phần hình/nền vẫn là bitmap
+và font Windows không được đóng gói vào file. Với headline, V7 đo footprint nét cũ, định hình bằng
+RAQM/HarfBuzz và có thể tối ưu trục OpenType Variable Font `wght`/`wdth` thay vì kéo giãn bitmap.
+Font/face/trục đã vượt gate ở kích thước nguồn được khóa và dùng lại ở x2..x20; lượt cuối không được
+tự chọn một kiểu chữ khác. Cả hình học nguồn, hình học cuối và độ trung thực của khóa font đều là gate cứng.
+V7 không tự dựng lại mọi hình minh họa, không bảo đảm khôi
+phục đúng chi tiết vốn đã mất và không xuất PDF/X. Muốn giao nhà in, sửa/duyệt bằng V7 trước rồi dùng
+V4 Print với ICC, bleed và khổ vật lý do nhà in yêu cầu.
+
+V7 `n=1` sửa ở kích thước nguồn bằng runtime OCR CPU và không cần GPU. V7 `n=2..20` dùng V3 CUDA để
+phóng lớp nền đã gỡ chữ, sau đó vẽ lại chữ ở đúng kích thước cuối; vì vậy các hệ số này cần máy NVIDIA
+và bộ runtime/model V3 đã cài. Mô hình ngôn ngữ tiếng Việt cục bộ chỉ đưa ra đề xuất để duyệt, không phải
+nguồn sự thật và có thể được tắt bằng `--no-language-model`.
 
 V4 không đổi đuôi giả. Chế độ `print` tạo một tài liệu mixed vector/raster đúng bản chất:
 lớp raster nhìn thấy là ứng viên **đồng nhất toàn ảnh** thắng QA và ablation ở pixel native x4.
@@ -81,10 +100,16 @@ Bỏ ảnh vào `INPUT`, rồi chạy một trong các lệnh:
 
 # V5 layer x4 trên master AI V3 — cần bộ model V3
 .\upscale layers poster.png 4
+
+# V7 sửa chữ ở kích thước nguồn — không cần GPU, mặc định mở cửa sổ duyệt
+.\upscale repair poster.png 1
+
+# V7 sửa chữ rồi làm lớn x4 — cần V3 CUDA
+.\upscale repair poster.png 4
 ```
 
-Tên file có khoảng trắng phải đặt trong dấu ngoặc kép. Có thể dùng `v2`, `v3`, `v4` hoặc `v5`;
-`vector` là chế độ V4 toàn path riêng, không phải bí danh của `print`.
+Tên file có khoảng trắng phải đặt trong dấu ngoặc kép. Có thể dùng các bí danh `v2`, `v3`, `v4`,
+`v5` hoặc `v7`; `v7` tương đương `repair`, còn `vector` là chế độ V4 toàn path riêng.
 
 ### Chạy cả thư mục
 
@@ -96,10 +121,15 @@ cấu trúc thư mục và xử lý tuần tự:
 .\upscale high "D:\BO ANH" 10
 .\upscale print "D:\BO ANH" 4 --width-mm 4000
 .\upscale layers "D:\BO ANH" 1
+.\upscale repair "D:\BO ANH" 1 --review defer
 ```
 
 Mỗi ảnh trong batch V4 dùng chung hệ số `n`, khổ rộng, bleed và ICC profile đã truyền.
 Mỗi ảnh batch V5 dùng cùng `n`, chạy tuần tự để không tranh VRAM và tạo một bundle riêng.
+Batch V7 tự chuyển chế độ duyệt GUI sang `defer`; mỗi ảnh có `TEXT_REVIEW.json` riêng. Sau khi sửa các
+JSON đó, chạy lại **đúng lệnh thư mục**: launcher tự chụp và nạp đúng review cũ của từng ảnh trước khi
+thay bundle. `--review-file` vẫn chỉ dùng khi chạy lại một ảnh. Hai nguồn trùng tên được tách bằng định
+danh đường dẫn; bundle cũ chỉ bị thay khi manifest chứng minh đúng nguồn.
 
 ## Lệnh V5 Smart Layers
 
@@ -146,6 +176,55 @@ Nếu cần chính tài liệu layer ở độ phân giải lớn ngay từ đ�
 PSD/ORA V5 là tài liệu raster RGB trung gian, không phải CMYK/PDF-X giao in và không cam kết giữ DPI
 hay khổ vật lý nguồn. Khi giao in, hãy dùng PNG đã sửa với `upscale print ... --width-mm ...` rồi
 preflight theo ICC/yêu cầu của nhà in.
+
+## Lệnh V7 Design Repair
+
+```text
+.\upscale repair <file-hoặc-thư-mục> <n>
+                  [--review gui|defer|auto|strict]
+                  [--review-file <TEXT_REVIEW.json>]
+                  [--ocr-passes 1..3] [--no-language-model]
+                  [--inpaint auto|poster|opencv|strict] [--allow-huge]
+```
+
+- `n=1`: nhận dạng, duyệt, gỡ/vẽ lại chữ ở kích thước nguồn; không cần GPU. Máy vẫn phải cài runtime
+  OCR CPU V7 và các model PP-OCRv6 cục bộ.
+- `n=2..20`: thực hiện cùng quy trình sửa chữ, dùng V3 CUDA để phóng nền sạch rồi vẽ lại chữ trực tiếp
+  ở độ phân giải cuối. Đây không phải đường chạy CPU thay thế cho V3.
+- `--review gui` là mặc định cho một ảnh. Vùng không chắc chắn mở cửa sổ để người dùng nhập chữ đúng
+  hoặc giữ nguyên; vùng chưa duyệt không bị tự sửa. `--review defer` ghi hồ sơ để duyệt sau và phù hợp batch.
+- `--review strict` đặt **mọi** vùng, kể cả vùng xanh, về trạng thái chờ cho tới khi review file có quyết
+  định rõ ràng. `auto`/`defer` chỉ được tự dựng vùng xanh khi cả PP-OCRv6 và Tesseract tiếng Việt đọc giống
+  nhau và confidence riêng của từng engine vượt ngưỡng.
+- Chạy lại ảnh gốc với `--review-file <TEXT_REVIEW.json>` để áp dụng đúng quyết định đã duyệt. V7 kiểm
+  SHA-256 nguồn và fingerprint NFC của bbox + chữ OCR gốc; thiếu hash, sửa nhầm dòng, đổi thứ tự OCR hoặc
+  geometry/text không còn khớp đều bị từ chối thay vì gắn quyết định vào vùng khác.
+- `--no-language-model` tắt đề xuất chính tả cục bộ nhưng vẫn giữ OCR đối chứng và bước duyệt. Tùy chọn
+  này hữu ích trên máy x1 không có runtime PyTorch/V3.
+- Nền dưới nét chữ cũ là phần tổng hợp từ ngữ cảnh nhìn thấy, không phải pixel gốc được khôi phục.
+  `strict` có thể giữ nguyên vùng khi ngữ cảnh không đủ tin cậy thay vì buộc nội suy.
+- Bbox OCR chỉ dùng để tìm vùng. Khung chữ cuối được siết bằng mask nét thật; font/độ rộng được chọn theo
+  hình học và bị `FAILED_QA` nếu tỷ lệ, tâm hoặc kích thước lệch quá ngưỡng. Không font nào được dùng nếu
+  thiếu glyph tiếng Việt. Font face, OpenType axes và font size theo tỷ lệ được khóa từ source gate sang
+  final gate; SVG lấy đúng render cuối đã khóa đó.
+
+Mỗi ảnh tạo một bundle trong `OUTPUT\V7_REPAIR`:
+
+```text
+<ten>_V7_REPAIR_xN\
+  <ten>_REPAIRED_xN.png       ảnh raster đã sửa; bản tham chiếu vị trí/hiển thị
+  <ten>_TEXT_EDITABLE.svg     nền raster + chữ Unicode <text> chỉnh sửa được
+  <ten>_CLEAN_BASE_xN.png     nền sau khi gỡ các vùng chữ được duyệt
+  TEXT_REVIEW.json            nội dung OCR, đề xuất và quyết định duyệt
+  QA.json                     gate chữ cũ, seam, clipping, hình học font và OCR đọc ngược
+  manifest.json               hash, model, hạn chế và trạng thái bundle
+```
+
+Bundle chỉ có trạng thái `PASS` khi các cổng kiểm tra đạt và không còn vùng bắt buộc duyệt. Trạng thái
+`REVIEW_REQUIRED` hoặc `FAILED_QA` là kết quả chẩn đoán/trung gian, không được tự gọi là file giao in.
+SVG V7 không nhúng file font, nên máy khác có thể thay font; PNG repaired là bản để đối chiếu hình thức.
+V7 không tạo PDF/X-4, CMYK, bleed hay khổ mét. Quy trình giao in khuyến nghị là V7 `n=1` → duyệt PNG/SVG
+→ dùng PNG repaired làm đầu vào cho V4 `print` với hệ số và `--width-mm` cần thiết → preflight theo nhà in.
 
 ## Lệnh V4 Print
 
@@ -217,11 +296,11 @@ hàng loạt.
 
 ## Phần cứng và runtime
 
-| Máy | V2 Fast | V3 High | V4 Print | V5 Layers |
-|---|---:|---:|---:|---:|
-| NVIDIA GTX/RTX phù hợp | Có | Có | Có, bắt buộc cho `print` | Có; nhanh nhất, x1 hoặc xN |
-| AMD/Intel có Vulkan | Có thể dùng | Không | Chỉ `vector` | Có bằng CPU, chậm; nên x1 |
-| Chỉ CPU | Chưa hỗ trợ | Không | Chỉ `vector`, có thể chậm | Có bằng CPU, chậm; nên x1 |
+| Máy | V2 Fast | V3 High | V4 Print | V5 Layers | V7 Repair |
+|---|---:|---:|---:|---:|---:|
+| NVIDIA GTX/RTX phù hợp | Có | Có | Có, bắt buộc cho `print` | Có; nhanh nhất, x1 hoặc xN | Có; x1 hoặc x2..x20 |
+| AMD/Intel có Vulkan | Có thể dùng | Không | Chỉ `vector` | Có bằng CPU, chậm; nên x1 | x1 bằng CPU; không x2..x20 |
+| Chỉ CPU | Chưa hỗ trợ | Không | Chỉ `vector`, có thể chậm | Có bằng CPU, chậm; nên x1 | x1 bằng CPU; không x2..x20 |
 
 V2 dùng Real-ESRGAN NCNN/Vulkan. V3 dùng PyTorch/CUDA. V4 `print` cần NVIDIA CUDA vì nó tạo/
 tái sử dụng master V3 native x4 rồi đánh giá thêm HAT tiled trên **toàn ảnh**. Deep có thể bị loại
@@ -264,8 +343,28 @@ máy bị hạn chế cài phần mềm có thể chủ động dùng `-SkipTess
 bỏ qua vùng OCR và ghi trạng thái vào manifest. Lượt `-CheckOnly` sau đó cũng phải mang cờ
 `-SkipTesseract`. Không model hay output lớn nào được commit lên Git.
 
+V7 không bao giờ dùng model English rồi ghi nhãn giả là phiếu tiếng Việt. Nếu thiếu file
+`V7\models\tessdata\vie.traineddata` đã kiểm tra, Tesseract được đánh dấu không khả dụng và không thể
+đóng góp phiếu xanh độc lập; vùng đó phải qua duyệt.
+
 Máy chỉ có CPU dùng V5 `n=1` (SAM sẽ chậm). Việc tạo master làm nét V3 mới cho `n>1` cần NVIDIA
 CUDA; cache V3 đã kiểm định có sẵn vẫn có thể tái dùng, nhưng máy CPU sạch không tự tạo cache đó.
+
+Cài/kiểm tra V7 bằng môi trường OCR CPU tách riêng. `-SkipLanguageModel` bỏ model đề xuất chính tả;
+`-SkipTesseract` bỏ phiếu OCR Tesseract và khiến các vùng không được tự xếp xanh chỉ từ một nguồn đọc:
+
+```powershell
+.\APP\engines\V7\setup_v7.ps1
+.\APP\engines\V7\setup_v7.ps1 -CheckOnly
+
+# Cài tối thiểu khi chỉ muốn OCR Paddle + duyệt tay
+.\APP\engines\V7\setup_v7.ps1 -SkipLanguageModel -SkipTesseract
+.\APP\engines\V7\setup_v7.ps1 -CheckOnly -SkipLanguageModel -SkipTesseract
+```
+
+V7 `n=1` không gọi engine V3 nên không cần GPU. V7 `n=2..20` luôn gọi V3 CUDA trên nền đã gỡ chữ;
+không có chế độ giả lập CPU cho bước này. Nếu model ngôn ngữ cục bộ không có, V7 vẫn chạy OCR/duyệt
+và ghi rõ model đề xuất không khả dụng; nội dung không được tự đoán để bù vào.
 
 ## Cấu trúc dự án
 
@@ -276,12 +375,14 @@ OUTPUT/V3_HIGH/           PNG V3
 OUTPUT/V4_PRINT/          bundle V4 Print SVG/PDF-X-4/PNG
 OUTPUT/V4_VECTOR/         bundle toàn vector cho artwork phẳng
 OUTPUT/V5_LAYERS/         bundle PSD/ORA/PNG-mask V5
+OUTPUT/V7_REPAIR/         bundle PNG/SVG chữ editable + duyệt/QA V7
 APP/
   upscale_cli.py          bộ điều phối một ảnh và cả thư mục
   engines/V2/             V2 Fast
   engines/V3/             V3 High và kiểm thử
   engines/V4/             V4 Print, export PDF/X-4 và kiểm thử
   engines/V5/             tách layer, tái tạo nền, PSD/ORA và kiểm thử
+  engines/V7/             OCR, duyệt, sửa chữ/nền và SVG text editable
   manifests/              báo cáo kỹ thuật cục bộ
   masters/                master/cache render cục bộ, có thể tái tạo, không đưa lên Git
   shared/                 công cụ phụ thuộc tải cục bộ, không đưa lên Git
@@ -330,6 +431,20 @@ finally {
 Checklist phát hành còn phải chạy một ảnh thật, mở lại PSD, validate ORA 0.0.6, so ảnh tái ghép
 với preview và kiểm tra nền khi tắt/move từng group cha–con.
 
+## Kiểm thử V7
+
+```powershell
+& .\APP\engines\V7\.venv\Scripts\python.exe -B -m unittest discover `
+  -s APP\engines\V7\tests -p "test_*.py" -v
+.\APP\engines\V7\setup_v7.ps1 -CheckOnly
+```
+
+Test tự động kiểm tra Unicode NFC tiếng Việt, khóa trường giá/điện thoại/mã hàng, review hash/fingerprint,
+phiếu OCR độc lập, footprint nền, pixel ngoài ROI, seam, clipping, font coverage, khóa OpenType fvar
+source→final, hình học/baseline SVG,
+PNG/SVG/manifest và trạng thái QA. Trước khi dùng cho
+đơn hàng thật vẫn phải mở PNG/SVG, đọc lại toàn bộ nội dung ở 100% và chạy V4/preflight nhà in riêng.
+
 ## Nguồn nền tảng
 
 - [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) và [Real-ESRGAN NCNN Vulkan](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan)
@@ -338,9 +453,10 @@ với preview và kiểm tra nền khi tắt/move từng group cha–con.
 - [Scribus](https://www.scribus.net/) và [pikepdf](https://github.com/pikepdf/pikepdf)
 - [ISO 15930-7 (PDF/X-4)](https://www.iso.org/standard/55843.html), [PDF Association: yêu cầu PDF/X](https://pdfa.org/technical-side-and-requirements-of-pdfx/), [GWG Sign & Display](https://gwg.org/sign-display/) và [W3C SVG 2 Embedded Content](https://www.w3.org/TR/SVG/embedded.html)
 - [SAM 2 chính thức](https://github.com/facebookresearch/sam2), [Grounding DINO chính thức](https://github.com/IDEA-Research/GroundingDINO), [Tesseract OCR](https://github.com/tesseract-ocr/tesseract), [LaMa chính thức](https://github.com/advimman/lama) và [OpenRaster](https://www.openraster.org/baseline/layer-stack-spec.html)
+- [PaddleOCR/PP-OCRv6](https://github.com/PaddlePaddle/PaddleOCR), [Unicode NFC/UAX #15](https://unicode.org/reports/tr15/), [HarfBuzz](https://harfbuzz.github.io/) và [OpenType](https://learn.microsoft.com/en-us/typography/opentype/spec/)
 
 Chi tiết phiên bản và giấy phép nằm trong `APP\engines`, `APP\engines\V4\SOURCES.md`,
-`APP\engines\V5\SOURCES.md` và
+`APP\engines\V5\SOURCES.md`, `APP\engines\V7\SOURCES.md` và
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Giấy phép

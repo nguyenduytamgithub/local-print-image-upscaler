@@ -9,6 +9,8 @@ if /I "%~1"=="vector" set "RESIZE_PYTHON=%RESIZE_ROOT%APP\engines\V4\.venv\Scrip
 if /I "%~1"=="layers" if exist "%RESIZE_ROOT%APP\engines\V5\.venv\Scripts\python.exe" set "RESIZE_PYTHON=%RESIZE_ROOT%APP\engines\V5\.venv\Scripts\python.exe"
 if /I "%~1"=="layer" if exist "%RESIZE_ROOT%APP\engines\V5\.venv\Scripts\python.exe" set "RESIZE_PYTHON=%RESIZE_ROOT%APP\engines\V5\.venv\Scripts\python.exe"
 if /I "%~1"=="v5" if exist "%RESIZE_ROOT%APP\engines\V5\.venv\Scripts\python.exe" set "RESIZE_PYTHON=%RESIZE_ROOT%APP\engines\V5\.venv\Scripts\python.exe"
+if /I "%~1"=="repair" set "RESIZE_PYTHON=%RESIZE_ROOT%APP\engines\V7\.venv\Scripts\python.exe"
+if /I "%~1"=="v7" set "RESIZE_PYTHON=%RESIZE_ROOT%APP\engines\V7\.venv\Scripts\python.exe"
 
 if not exist "%RESIZE_PYTHON%" (
   echo LOI: Khong tim thay Python noi bo trong APP.

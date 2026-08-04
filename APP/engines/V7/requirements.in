@@ -1,0 +1,13 @@
+# V7 OCR/runtime is intentionally isolated from V3/V5 CUDA PyTorch.
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+paddlex==3.7.2
+pillow==12.3.0
+numpy==2.3.5
+opencv-contrib-python==4.10.0.84
+fonttools==4.63.0
+freetype-py==2.5.1
+uharfbuzz==0.56.0
+regex==2026.7.19
+scipy==1.17.1
+scikit-image==0.26.0
