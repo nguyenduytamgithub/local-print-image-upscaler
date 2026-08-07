@@ -359,7 +359,7 @@ else {
     Write-Warning "Tesseract was skipped; V5 works, but OCR naming/grouping hints are unavailable."
 }
 
-Write-Host "Downloading exact, revision-pinned SAM 2.1 and Grounding DINO snapshots..."
+Write-Host "Downloading exact, revision-pinned SAM 2.1, Grounding DINO and ViTMatte snapshots..."
 & $python $modelSetup --lama $lamaModel
 if ($LASTEXITCODE -ne 0) { throw "Could not prepare the V5 models." }
 

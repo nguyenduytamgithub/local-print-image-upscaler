@@ -18,6 +18,11 @@ MODELS = (
         "a2bb814dd30d776dcf7e30523b00659f4f141c71",
         "1a2412ef99bd74bcd3c2a246fa1e48581f8889a1300c9051974741314fc042f3",
     ),
+    (
+        "hustvl/vitmatte-small-composition-1k",
+        "53222614392e8bd24ed804fbd2f9a43c46ac3850",
+        "bda9289db1bb6762d978b42d1c62ae3f34daf7497171a347a1d09657efd788cb",
+    ),
 )
 LAMA_SHA256 = "7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210c9e6b4c"
 

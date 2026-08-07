@@ -36,6 +36,85 @@ verifies `vie.traineddata`; if Tesseract is absent, it installs the exact
 fallback; V5 then records OCR as unavailable and continues without claiming
 text recognition.
 
+## Runtime text topology and matte refinement
+
+- OpenCV contour hierarchy documentation (`RETR_CCOMP`/`RETR_TREE`), used to
+  preserve and audit nested foreground/background regions:
+  <https://docs.opencv.org/4.x/d9/d8b/tutorial_py_contours_hierarchy.html>
+- ViTMatte official repository and reference implementation (MIT):
+  <https://github.com/hustvl/ViTMatte>
+- Hugging Face Transformers ViTMatte documentation, including the required
+  image-plus-trimap input contract:
+  <https://huggingface.co/docs/transformers/model_doc/vitmatte>
+- Hugging Face model card/distribution metadata for the selected Composition-1k
+  small checkpoint (Apache-2.0 metadata):
+  <https://huggingface.co/hustvl/vitmatte-small-composition-1k>
+- V5 ViTMatte snapshot: `hustvl/vitmatte-small-composition-1k` at commit
+  `53222614392e8bd24ed804fbd2f9a43c46ac3850`, with `model.safetensors`
+  SHA-256
+  `BDA9289DB1BB6762D978B42D1C62AE3F34DAF7497171A347A1D09657EFD788CB`.
+
+OpenCV and the pinned ViTMatte-S checkpoint are **runtime dependencies**, not
+research citations alone. The deterministic OpenCV/NumPy pass first estimates
+local panel colour, removes colour-supported O/0 counters, G/C apertures and
+N-like negative space, and preserves immutable source-ink cores. Compact
+Vietnamese marks omitted by a proposal can be restored only through spatial
+alignment to a glyph anchor plus Lab-colour agreement; long rules and remote
+fragments are rejected. Contour hierarchy and connected-component counts are
+recorded for topology QA.
+
+ViTMatte-S then receives a narrow trimap around that fixed mask through the
+pinned Transformers runtime. It predicts fractional alpha inside the accepted
+topology only: sure foreground and negative space remain hard constraints, and
+the result is clipped before export. CUDA is selected when PyTorch reports it
+available; the same revision also has a slower CPU path. Setup downloads the
+revision-pinned snapshot once, validates the safetensors hash, and normal runs
+resolve it from the local cache without network access.
+
+The final deterministic pass is performed on the exact source-resolution layer
+stack, not on the model output in isolation. OpenCV connected components find
+only area-one alpha islands promoted by the recomposition solver; local CIE Lab
+background evidence and a reliable glyph-body palette decide whether a pixel
+may be transferred to the parent layer. Parent/background targets are rebuilt,
+the flattened stack must remain exact within one 8-bit level, and the automatic
+transfer budget is capped at two pixels per text layer.
+
+After that detector converges, V5 freezes the serialized x1 alpha and plans the
+actual PSD/ORA z-order backwards. For opaque lower colour `B`, foreground `F`
+and alpha `A`, it uses Pillow's integer result
+`floor((A*F + (255-A)*B + 127) / 255)`. The preferred clean plate is projected
+to the nearest per-channel colour for which an exact integer foreground exists;
+alpha is never enlarged to force a colour match. Runtime gates then require
+byte-identical canonical alpha plus spatial foreground-component and enclosed
+background-hole correspondence at levels 64, 128 and 192. This solver is local
+deterministic NumPy/Pillow code; it does not add a cloud service or undeclared
+model dependency.
+
+## Mask refinement references and evaluated alternatives
+
+- HQ-SAM official repository/paper implementation:
+  <https://github.com/SysCV/sam-hq>
+- SAMRefiner official repository:
+  <https://github.com/linyq2117/SAMRefiner>
+- Matting Anything official repository (CVPR 2023):
+  <https://github.com/SHI-Labs/Matting-Anything>
+- LayerD official repository (ICCV 2025):
+  <https://github.com/CyberAgentAILab/LayerD>
+- Guided image filtering paper (ECCV 2010):
+  <https://mmlab.ie.cuhk.edu.hk/2010/eccv10_Guided.pdf>
+
+The projects and paper in this section are evaluated alternatives or design
+references, not undeclared runtime dependencies. OpenCV and ViTMatte-S are the
+explicit exceptions documented in the runtime section above. V5's release path
+keeps the pinned SAM 2.1 proposals because, on the bundled poster regression
+image, their exact recorded components already isolate the icons cleanly. A
+pinned local LayerD evaluation was also performed: it produced only three broad
+layers on that artwork and lost/damaged fine poster text, so it was not
+substituted blindly for the working multi-object grouping. The delivery pass
+instead requires exact component provenance, colour/topology-clean text,
+anchor-and-colour protection for Vietnamese marks, topology-constrained
+fractional alpha and a hard alpha-ownership gate.
+
 ## Background reconstruction
 
 - LaMa official repository and checkpoints (Apache-2.0):

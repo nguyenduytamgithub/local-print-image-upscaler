@@ -25,14 +25,24 @@ from v5lib.formats import (
     export_ora,
     export_png_assets,
     export_psd,
+    find_required_alpha_promoted_singletons,
+    matte_quality_report,
+    ordered_layer_specs,
     package_layers_zip,
+    prune_required_alpha_promoted_singletons,
+    project_clean_plate_for_alpha,
     render_layers,
+    rendered_alpha_canvases,
     resize_rgb,
+    resize_semantic_support,
     save_color_png,
+    serialized_base_alpha_u8,
     sha256_file,
     write_json,
 )
-from v5lib.geometry import dilate_mask
+from v5lib.matte_clean import clean_semantic_layer_masks, clean_text_layer_masks
+from v5lib.matting import refine_text_alpha_mattes
+from v5lib.model import LayerSpec
 from v5lib.poster_group import add_ocr_text_layers, group_poster_layers
 from v5lib.restore import photographic_score, restore_background
 from v5lib.segment import (
@@ -134,6 +144,239 @@ def assert_portable_bundle_manifest(value: object, staging_dir: Path) -> None:
         )
 
 
+def reserve_promoted_singleton_budget(
+    records: list[dict[str, object]],
+    already_removed: dict[str, int],
+    *,
+    maximum_per_layer: int = 2,
+) -> dict[str, int]:
+    """Reserve a hard cumulative auto-removal budget for each text layer."""
+
+    if maximum_per_layer < 1:
+        raise ValueError("maximum_per_layer must be positive.")
+    updated = {str(layer_id): int(count) for layer_id, count in already_removed.items()}
+    if any(count < 0 for count in updated.values()):
+        raise ValueError("already_removed counts cannot be negative.")
+    for record in records:
+        try:
+            layer_id = str(record["layer_id"])
+        except (KeyError, TypeError) as exc:
+            raise ValueError("Promoted-singleton budget record is malformed.") from exc
+        updated[layer_id] = updated.get(layer_id, 0) + 1
+        if updated[layer_id] > maximum_per_layer:
+            raise RuntimeError(
+                "V5 found more renderer-promoted singleton candidates than the "
+                f"safe cumulative cap ({maximum_per_layer}) for layer {layer_id!r}; "
+                "automatic cleanup stopped and no bundle was published."
+            )
+    return updated
+
+
+def summarize_topology_failures(
+    matte_qa: dict[str, object],
+    *,
+    maximum_records: int = 12,
+) -> list[str]:
+    """Return compact release-gate diagnostics with exact failing relations."""
+
+    if maximum_records < 1:
+        raise ValueError("maximum_records must be positive.")
+    fields = (
+        "missing_expected_pixels",
+        "orphan_actual_components",
+        "orphan_actual_component_pixels",
+        "merged_actual_components",
+        "merge_excess",
+        "split_expected_components",
+        "split_excess",
+        "missing_expected_holes",
+        "new_actual_holes",
+        "split_expected_holes",
+        "merged_actual_holes",
+        "expected_hole_core_intrusion_pixels",
+    )
+    summaries: list[str] = []
+    for layer in matte_qa.get("layers", []):
+        if not isinstance(layer, dict):
+            continue
+        topology = layer.get("scaled_topology")
+        if not isinstance(topology, dict) or topology.get("passed", True):
+            continue
+        for threshold in topology.get("thresholds", []):
+            if not isinstance(threshold, dict) or threshold.get("passed", True):
+                continue
+            failures = [
+                f"{field}={int(threshold[field])}"
+                for field in fields
+                if int(threshold.get(field, 0)) != 0
+            ]
+            summaries.append(
+                f"{layer.get('layer_id', '?')}@{threshold.get('integer_alpha_level', '?')}:"
+                + (",".join(failures) if failures else "unspecified_topology_failure")
+            )
+            if len(summaries) >= maximum_records:
+                return summaries
+    return summaries
+
+
+def apply_canonical_refined_alpha(
+    layers: list[LayerSpec],
+    topology_reference: dict[str, np.ndarray],
+) -> list[LayerSpec]:
+    """Promote stable x1 serialized alpha to the immutable xN source of truth."""
+
+    updated: list[LayerSpec] = []
+    for layer in layers:
+        if layer.alpha_matte is None:
+            updated.append(layer)
+            continue
+        if layer.layer_id not in topology_reference:
+            raise ValueError(
+                f"Missing canonical refined alpha for layer: {layer.layer_id}"
+            )
+        canonical = np.asarray(topology_reference[layer.layer_id])
+        if canonical.dtype != np.uint8 or canonical.ndim != 2:
+            raise ValueError("Canonical refined alpha must be two-dimensional uint8.")
+        if canonical.shape != layer.mask.shape:
+            raise ValueError(
+                f"Canonical refined alpha shape {canonical.shape} does not match "
+                f"mask {layer.mask.shape} for {layer.layer_id}."
+            )
+        if np.logical_and(canonical > 0, ~layer.mask).any():
+            raise ValueError(
+                f"Canonical refined alpha escapes semantic mask: {layer.layer_id}"
+            )
+        updated.append(
+            LayerSpec(
+                layer_id=layer.layer_id,
+                name=layer.name,
+                category=layer.category,
+                mask=np.array(layer.mask, dtype=bool, copy=True),
+                score=float(layer.score),
+                source_ids=list(layer.source_ids),
+                label=layer.label,
+                text=layer.text,
+                metadata=dict(layer.metadata),
+                alpha_matte=canonical.astype(np.float32) / 255.0,
+            )
+        )
+    return updated
+
+
+def plan_fixed_alpha_stack(
+    master_rgb: np.ndarray,
+    background_candidate_rgb: np.ndarray,
+    layers: list[LayerSpec],
+    alpha_canvases: dict[str, np.ndarray],
+    *,
+    preferred_layer_targets: dict[str, np.ndarray] | None = None,
+) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, object]]:
+    """Plan every lower prefix backwards without changing serialized alpha.
+
+    A clean background (or cleaned parent) can be too different from the
+    requested master for a translucent edge to reconstruct.  Solving each
+    layer independently in forward order is unsafe when layers overlap: alpha
+    owned by a later child cannot help an earlier parent.  This planner starts
+    from the exact final master and walks the real PSD/ORA z-order backwards.
+    For each layer it projects only the immediately lower prefix into the
+    colour interval that *that layer's own uint8 alpha* can reconstruct.
+
+    The returned target for a layer is the planned prefix immediately after
+    that layer.  Therefore a normal bottom-to-top renderer can reproduce every
+    planned prefix while preserving holes and antialiased contour coverage.
+    """
+
+    master = np.asarray(master_rgb)
+    background_candidate = np.asarray(background_candidate_rgb)
+    if (
+        master.dtype != np.uint8
+        or background_candidate.dtype != np.uint8
+        or master.ndim != 3
+        or master.shape[2] != 3
+        or background_candidate.shape != master.shape
+    ):
+        raise ValueError(
+            "master_rgb and background_candidate_rgb must be same-shape uint8 RGB arrays."
+        )
+    preferred_targets = preferred_layer_targets or {}
+    unknown_targets = sorted(set(preferred_targets) - {layer.layer_id for layer in layers})
+    if unknown_targets:
+        raise ValueError(
+            "Preferred targets reference unknown layer ids: " + ", ".join(unknown_targets)
+        )
+
+    ordered = ordered_layer_specs(layers)
+    height, width = master.shape[:2]
+    shape = (height, width)
+    preferred_prefixes: list[np.ndarray] = [
+        np.array(background_candidate, dtype=np.uint8, copy=True)
+    ]
+    for layer in ordered:
+        alpha = alpha_canvases.get(layer.layer_id)
+        if alpha is None:
+            raise ValueError(f"Missing serialized alpha canvas for {layer.layer_id!r}.")
+        alpha_array = np.asarray(alpha)
+        if alpha_array.dtype != np.uint8 or alpha_array.shape != shape:
+            raise ValueError(
+                f"Serialized alpha for {layer.layer_id!r} must be canvas-size uint8."
+            )
+        target = np.asarray(preferred_targets.get(layer.layer_id, master))
+        if target.dtype != np.uint8 or target.shape != master.shape:
+            raise ValueError(
+                f"Preferred target for {layer.layer_id!r} must be canvas-size uint8 RGB."
+            )
+        preferred_after = preferred_prefixes[-1].copy()
+        support = alpha_array > 0
+        preferred_after[support] = target[support]
+        preferred_prefixes.append(preferred_after)
+
+    # Reuse the preferred-prefix storage in place. During the descending walk,
+    # index ``i`` is still its untouched clean preference while ``i + 1`` has
+    # already become the exact planned upper prefix. This avoids retaining two
+    # full RGB canvases per layer on large print jobs.
+    planned_prefixes = preferred_prefixes
+    planned_prefixes[-1] = np.array(master, dtype=np.uint8, copy=True)
+    reverse_reports: list[dict[str, object]] = []
+    for index in range(len(ordered) - 1, -1, -1):
+        layer = ordered[index]
+        upper_target = planned_prefixes[index + 1]
+        lower, projection = project_clean_plate_for_alpha(
+            upper_target,
+            preferred_prefixes[index],
+            alpha_canvases[layer.layer_id],
+        )
+        planned_prefixes[index] = lower
+        reverse_reports.append(
+            {
+                "layer_id": layer.layer_id,
+                "z_index_bottom_to_top": index,
+                **projection,
+            }
+        )
+
+    planned_background = planned_prefixes[0]
+    layer_targets = {
+        layer.layer_id: planned_prefixes[index + 1]
+        for index, layer in enumerate(ordered)
+    }
+    ordered_reports = list(reversed(reverse_reports))
+    return planned_background, layer_targets, {
+        "policy": (
+            "exact uint8 alpha-feasible projection solved backwards over the canonical "
+            "PSD/ORA z-order; each step uses only that layer's own serialized alpha"
+        ),
+        "layer_count": len(ordered),
+        "changed_pixel_count_sum": sum(
+            int(record["changed_pixel_count"]) for record in ordered_reports
+        ),
+        "all_steps_feasible": all(
+            bool(record.get("feasibility_gate_passed", False))
+            for record in ordered_reports
+        ),
+        "layers": ordered_reports,
+    }
+
+
 def main() -> int:
     args = parse_args()
     source, output_dir, name = validate_args(args)
@@ -222,84 +465,365 @@ def main() -> int:
                 "photographic_score": round(content_score, 5),
             }
         )
-    del masks, scores, candidates
     if not layers:
         raise RuntimeError(
             "V5 did not find a stable movable region. Keep the original image and try another source."
         )
 
-    by_id = {layer.layer_id: layer for layer in layers}
-    top_level_masks = [
-        layer.mask for layer in layers if layer.metadata.get("parent_id") is None
-    ]
-    restoration = restore_background(
+    # The grouping stage deliberately explores halos and nearby colour regions.
+    # Editable ownership must be stricter: recover the exact recorded SAM
+    # components for objects, then strip panel rules/unanchored specks from text.
+    layers, object_matte_report = clean_semantic_layer_masks(layers, masks)
+    layers, text_matte_report = clean_text_layer_masks(layers, image_rgb=source_rgb)
+    layers, vitmatte_report = refine_text_alpha_mattes(
         source_rgb,
-        top_level_masks,
-        mode=args.inpaint,
+        layers,
+        progress=lambda message: print(message, flush=True),
     )
-    background_rgb = resize_rgb(restoration.background, final_size)
-    footprint_image = Image.fromarray(
-        restoration.removal_footprint.astype(np.uint8) * 255,
-        "L",
-    )
-    if footprint_image.size != final_size:
-        footprint_image = footprint_image.resize(final_size, Image.Resampling.NEAREST)
-    background_footprint_final = np.array(footprint_image, dtype=np.uint8) > 0
-    # Lanczos can otherwise bleed synthesized pixels outside the declared
-    # removal footprint.  The final clean base must equal the selected master
-    # byte-for-byte everywhere V5 did not explicitly replace hidden content.
-    background_rgb[~background_footprint_final] = master_rgb[~background_footprint_final]
-    background_image = Image.fromarray(background_rgb, "RGB")
-
-    restoration_radius = int(restoration.report["removal_radius_source_px"])
-    support_masks: dict[str, np.ndarray] = {
-        layer.layer_id: dilate_mask(layer.mask, restoration_radius) for layer in layers
+    matte_cleanup_report = {
+        "delivery_policy": (
+            "colour/topology-clean semantic ownership followed by pinned ViTMatte "
+            "fractional coverage constrained inside that topology"
+        ),
+        "objects": object_matte_report,
+        "text": text_matte_report,
+        "text_boundary_refinement": vitmatte_report,
     }
+    del masks, scores, candidates
 
-    def descendants(layer_id: str) -> list[np.ndarray]:
-        result: list[np.ndarray] = []
+    by_id = {layer.layer_id: layer for layer in layers}
+
+    def layer_cleanup_support(layer: LayerSpec, size: tuple[int, int]) -> np.ndarray:
+        """Return pixels that lower layers may replace with synthesized colour.
+
+        Fractional text can render in a one-source-pixel Lanczos envelope, but
+        that envelope is antialias coverage rather than semantic ownership.
+        Keeping the master on lower layers outside nearest-resized ownership
+        prevents resampling lobes from requiring opaque alpha promotion.
+        """
+
+        return resize_semantic_support(layer.mask, size)
+
+    def serialized_alpha_cache(size: tuple[int, int]) -> dict[str, np.ndarray]:
+        return {
+            layer.layer_id: serialized_base_alpha_u8(
+                layer,
+                size,
+                matte_policy="clean",
+            )
+            for layer in layers
+        }
+
+    def descendants(layer_id: str) -> list[LayerSpec]:
+        result: list[LayerSpec] = []
         queue = list(by_id[layer_id].metadata.get("children", []))
         while queue:
             child_id = str(queue.pop(0))
             child = by_id.get(child_id)
             if child is None:
                 continue
-            result.append(child.mask)
+            result.append(child)
             queue.extend(child.metadata.get("children", []))
         return result
 
-    layer_targets: dict[str, np.ndarray] = {}
-    hierarchy_cleanup: list[dict[str, object]] = []
-    for layer in layers:
-        child_masks = descendants(layer.layer_id)
-        if not child_masks:
-            continue
-        cleaned = restore_background(
+    def prepare_source_stack():
+        """Build the intentionally unprojected x1 detector clean plates.
+
+        Required-alpha promotion is evidence for the narrowly scoped speck
+        detector.  Alpha-feasible projection happens only after that detector
+        converges, so the historical three bad singleton candidates remain
+        observable and removable.
+        """
+
+        top_level_masks = [
+            layer.mask for layer in layers if layer.metadata.get("parent_id") is None
+        ]
+        restoration_pass = restore_background(
             source_rgb,
-            child_masks,
-            mode="poster",
-            progress=lambda _message: None,
+            top_level_masks,
+            mode=args.inpaint,
         )
-        cleaned_final = resize_rgb(cleaned.background, final_size)
-        footprint_final = Image.fromarray(cleaned.removal_footprint.astype(np.uint8) * 255, "L")
-        if footprint_final.size != final_size:
-            footprint_final = footprint_final.resize(final_size, Image.Resampling.NEAREST)
-        replace = np.array(footprint_final, dtype=np.uint8) > 0
+        background_candidate = np.array(
+            restoration_pass.background, dtype=np.uint8, copy=True
+        )
+        background_source = background_candidate
+        background_semantic_source = np.zeros(source_rgb.shape[:2], dtype=bool)
+        for layer in layers:
+            if layer.metadata.get("parent_id") is None:
+                background_semantic_source |= layer_cleanup_support(
+                    layer, source_image.size
+                )
+        # Detector preflight intentionally keeps the old full semantic clean
+        # plate so renderer-promoted background specks remain visible.
+        background_source[~background_semantic_source] = source_rgb[
+            ~background_semantic_source
+        ]
+
+        source_targets: dict[str, np.ndarray] = {}
+        cleaned_sources: dict[str, np.ndarray] = {}
+        cleanup_records: list[dict[str, object]] = []
+        for layer in layers:
+            child_layers = descendants(layer.layer_id)
+            if not child_layers:
+                continue
+            cleaned = restore_background(
+                source_rgb,
+                [child.mask for child in child_layers],
+                mode="poster",
+                progress=lambda _message: None,
+            )
+            cleaned_source = np.array(cleaned.background, dtype=np.uint8, copy=True)
+            child_union = np.zeros(source_rgb.shape[:2], dtype=bool)
+            replace_source = np.zeros(source_rgb.shape[:2], dtype=bool)
+            for child in child_layers:
+                child_union |= child.mask
+                replace_source |= layer_cleanup_support(child, source_image.size)
+            target_for_layer = source_rgb.copy()
+            target_for_layer[replace_source] = cleaned_source[replace_source]
+            source_targets[layer.layer_id] = target_for_layer
+            cleaned_sources[layer.layer_id] = cleaned_source
+            cleanup_records.append(
+                {
+                    "layer_id": layer.layer_id,
+                    "descendant_masks_removed": len(child_layers),
+                    "cleanup_footprint_ratio": round(
+                        float(cleaned.removal_footprint.mean()), 6
+                    ),
+                    "published_semantic_ratio": round(float(child_union.mean()), 6),
+                }
+            )
+        return (
+            restoration_pass,
+            background_source,
+            source_targets,
+            cleaned_sources,
+            cleanup_records,
+        )
+
+    # The exact-colour solver may promote a low, background-like source alpha
+    # to 255 after ViTMatte. Detect that only at x1, transfer the pixel out of
+    # the child mask, and rebuild every lower target so no ghost is left behind.
+    preflight_passes: list[dict[str, object]] = []
+    maximum_preflight_prune_passes = 3
+    maximum_promoted_singletons_per_layer = 2
+    removed_promoted_singletons_by_layer: dict[str, int] = {}
+    for preflight_index in range(maximum_preflight_prune_passes + 1):
+        (
+            restoration,
+            background_source,
+            source_layer_targets,
+            cleaned_layer_sources,
+            hierarchy_cleanup,
+        ) = prepare_source_stack()
+        (
+            preflight_rendered,
+            preflight_composite,
+            preflight_composition,
+        ) = render_layers(
+            source_rgb,
+            background_source,
+            layers,
+            layer_targets=source_layer_targets,
+            matte_policy="clean",
+        )
+        if int(preflight_composition["recomposition_max_abs_error"]) > MAX_RECOMPOSITION_ERROR:
+            raise RuntimeError(
+                "V5 source-resolution ownership preflight could not reproduce the source "
+                "within the release error limit."
+            )
+        promoted = find_required_alpha_promoted_singletons(
+            preflight_rendered,
+            source_image.size,
+            source_rgb,
+        )
+        pass_record: dict[str, object] = {
+            "pass": preflight_index + 1,
+            "candidate_count": len(promoted),
+            "candidates": promoted,
+            "recomposition_max_abs_error": int(
+                preflight_composition["recomposition_max_abs_error"]
+            ),
+        }
+        preflight_passes.append(pass_record)
+        if not promoted:
+            del preflight_rendered, preflight_composite
+            break
+        del preflight_rendered, preflight_composite
+        if preflight_index >= maximum_preflight_prune_passes:
+            raise RuntimeError(
+                "V5 promoted-singleton cleanup did not converge safely; no bundle was published."
+            )
+        reserved_budget = reserve_promoted_singleton_budget(
+            promoted,
+            removed_promoted_singletons_by_layer,
+            maximum_per_layer=maximum_promoted_singletons_per_layer,
+        )
+        layers, prune_report = prune_required_alpha_promoted_singletons(
+            layers,
+            promoted,
+        )
+        pass_record["prune"] = prune_report
+        if int(prune_report["applied_count"]) != len(promoted):
+            raise RuntimeError(
+                "V5 promoted-singleton cleanup became stale during preflight; "
+                "no bundle was published."
+            )
+        removed_promoted_singletons_by_layer = reserved_budget
+        by_id = {layer.layer_id: layer for layer in layers}
+    else:  # pragma: no cover - loop either converges or raises above
+        raise RuntimeError("V5 promoted-singleton preflight did not terminate.")
+
+    # Detector is now stable. Build a separate canonical delivery render whose
+    # lower prefixes are projected backwards against the raw, pruned x1 matte.
+    # This preserves exact topology instead of canonizing renderer promotions
+    # caused by an over-clean background or parent plate.
+    source_alpha_canvases = serialized_alpha_cache(source_image.size)
+    (
+        canonical_background,
+        canonical_layer_targets,
+        canonical_projection_report,
+    ) = plan_fixed_alpha_stack(
+        source_rgb,
+        background_source,
+        layers,
+        source_alpha_canvases,
+        preferred_layer_targets=source_layer_targets,
+    )
+    if not canonical_projection_report["all_steps_feasible"]:
+        raise RuntimeError(
+            "V5 reverse fixed-alpha canonical planning found an infeasible prefix; "
+            "no bundle was published."
+        )
+    (
+        canonical_rendered,
+        canonical_composite,
+        canonical_composition,
+    ) = render_layers(
+        source_rgb,
+        canonical_background,
+        layers,
+        layer_targets=canonical_layer_targets,
+        matte_policy="clean",
+    )
+    if int(canonical_composition["recomposition_max_abs_error"]) > MAX_RECOMPOSITION_ERROR:
+        raise RuntimeError(
+            "V5 alpha-feasible source canonical render could not reproduce the source "
+            "within the release error limit."
+        )
+    canonical_alpha_canvases = rendered_alpha_canvases(
+        canonical_rendered,
+        source_image.size,
+    )
+    for layer in layers:
+        actual_alpha = canonical_alpha_canvases.get(layer.layer_id)
+        expected_alpha = source_alpha_canvases[layer.layer_id]
+        if actual_alpha is None or not np.array_equal(actual_alpha, expected_alpha):
+            raise RuntimeError(
+                "V5 source canonical render changed fixed serialized alpha for "
+                f"{layer.layer_id!r}; no bundle was published."
+            )
+    topology_reference = {
+        layer.layer_id: canonical_alpha_canvases[layer.layer_id]
+        for layer in layers
+        if layer.alpha_matte is not None
+    }
+    del (
+        canonical_rendered,
+        canonical_composite,
+        canonical_background,
+        canonical_layer_targets,
+        canonical_alpha_canvases,
+        source_alpha_canvases,
+        source_layer_targets,
+        background_source,
+    )
+    layers = apply_canonical_refined_alpha(layers, topology_reference)
+    by_id = {layer.layer_id: layer for layer in layers}
+    matte_cleanup_report["canonical_scaled_alpha"] = {
+        "policy": (
+            "after the unprojected speck detector converges, a separate reverse-planned "
+            "x1 delivery render must preserve the raw pruned serialized alpha byte-for-byte; "
+            "that stable alpha replaces raw ViTMatte coverage for all later scaling while "
+            "semantic masks and hierarchy metadata remain unchanged"
+        ),
+        "refined_layer_count": len(topology_reference),
+        "source_size": list(source_image.size),
+        "source_recomposition_max_abs_error": int(
+            canonical_composition["recomposition_max_abs_error"]
+        ),
+    }
+
+    promoted_singleton_report = {
+        "policy": (
+            "unprojected source-resolution detector preflight; remove only renderer-promoted "
+            "area-1 pure-text alpha with low source matte plus local background colour "
+            "evidence, then rebuild parent/background ownership before canonical planning"
+        ),
+        "stable": not bool(preflight_passes[-1]["candidate_count"]),
+        "pass_count": len(preflight_passes),
+        "removed_count": sum(
+            int(record.get("prune", {}).get("applied_count", 0))
+            for record in preflight_passes
+        ),
+        "maximum_automatic_removals_per_layer": (
+            maximum_promoted_singletons_per_layer
+        ),
+        "removed_by_layer": removed_promoted_singletons_by_layer,
+        "passes": preflight_passes,
+    }
+    matte_cleanup_report["render_promoted_singletons"] = promoted_singleton_report
+
+    matte_cleanup_report["alpha_feasible_clean_plate_projection"] = {
+        "source_canonical": canonical_projection_report,
+        "final_delivery": None,
+    }
+
+    background_candidate = resize_rgb(restoration.background, final_size)
+    background_semantic_final = np.zeros(master_rgb.shape[:2], dtype=bool)
+    for layer in layers:
+        if layer.metadata.get("parent_id") is None:
+            background_semantic_final |= layer_cleanup_support(layer, final_size)
+    # Shadows, glows, panel borders and adjacent artwork do not belong to a
+    # movable object merely because the inpainting solver needed a wider work
+    # footprint. Keep every non-semantic pixel on the lower/background layer.
+    background_candidate[~background_semantic_final] = master_rgb[
+        ~background_semantic_final
+    ]
+    restoration.report["published_replacement_policy"] = (
+        "synthesized pixels published only inside top-level semantic ownership; "
+        "restoration work radius never expands an editable alpha matte; exact "
+        "uint8 feasibility may retain master colour where translucent coverage "
+        "cannot reconstruct the fully cleaned candidate"
+    )
+
+    preferred_layer_targets: dict[str, np.ndarray] = {}
+    for layer_id, cleaned_source in cleaned_layer_sources.items():
+        cleaned_final = resize_rgb(cleaned_source, final_size)
+        replace = np.zeros(master_rgb.shape[:2], dtype=bool)
+        for child in descendants(layer_id):
+            replace |= layer_cleanup_support(child, final_size)
         target_for_layer = master_rgb.copy()
         target_for_layer[replace] = cleaned_final[replace]
-        layer_targets[layer.layer_id] = target_for_layer
-        # The parent needs enough drawable support to place the synthesized
-        # clean plate beneath its descendants.  Each descendant already has
-        # its own same-radius support mask for reconstructing the visible edge,
-        # glow or shadow when the stack is flattened.
-        support_masks[layer.layer_id] |= cleaned.removal_footprint
-        hierarchy_cleanup.append(
-            {
-                "layer_id": layer.layer_id,
-                "descendant_masks_removed": len(child_masks),
-                "cleanup_footprint_ratio": round(float(cleaned.removal_footprint.mean()), 6),
-            }
+        preferred_layer_targets[layer_id] = target_for_layer
+
+    final_alpha_canvases = serialized_alpha_cache(final_size)
+    background_rgb, layer_targets, final_projection_report = plan_fixed_alpha_stack(
+        master_rgb,
+        background_candidate,
+        layers,
+        final_alpha_canvases,
+        preferred_layer_targets=preferred_layer_targets,
+    )
+    del background_candidate, preferred_layer_targets
+    if not final_projection_report["all_steps_feasible"]:
+        raise RuntimeError(
+            "V5 reverse fixed-alpha clean-plate planning found an infeasible prefix; "
+            "no bundle was published."
         )
+    matte_cleanup_report["alpha_feasible_clean_plate_projection"][
+        "final_delivery"
+    ] = final_projection_report
+    background_image = Image.fromarray(background_rgb, "RGB")
 
     print("  V5 bước 4/4: đang dựng PNG layer, PSD, OpenRaster và kiểm định...", flush=True)
     rendered, composite, composition_report = render_layers(
@@ -307,7 +831,7 @@ def main() -> int:
         background_rgb,
         layers,
         layer_targets=layer_targets,
-        support_masks=support_masks,
+        matte_policy="clean",
     )
     composition_report["release_max_abs_error"] = MAX_RECOMPOSITION_ERROR
     composition_report["release_gate_passed"] = (
@@ -318,6 +842,41 @@ def main() -> int:
             "V5 layer stack cannot reproduce the selected master safely: "
             f"max error {composition_report['recomposition_max_abs_error']} > "
             f"{MAX_RECOMPOSITION_ERROR}. No bundle was published."
+        )
+    delivered_alpha_canvases = rendered_alpha_canvases(rendered, final_size)
+    for layer in layers:
+        actual_alpha = delivered_alpha_canvases.get(layer.layer_id)
+        expected_alpha = final_alpha_canvases[layer.layer_id]
+        if actual_alpha is None or not np.array_equal(actual_alpha, expected_alpha):
+            raise RuntimeError(
+                "V5 final renderer changed canonical fixed alpha for "
+                f"{layer.layer_id!r}; no bundle was published."
+            )
+    composition_report["fixed_alpha_gate_passed"] = True
+    composition_report["fixed_alpha_checked_layer_count"] = len(layers)
+    composition_report["fixed_alpha_policy"] = (
+        "every delivered PNG alpha canvas must equal the reverse-planner's "
+        "serialized canonical alpha byte-for-byte"
+    )
+    del delivered_alpha_canvases, final_alpha_canvases, layer_targets
+    matte_qa = matte_quality_report(
+        rendered,
+        final_size,
+        topology_reference=topology_reference,
+    )
+    if not matte_qa["ownership_gate_passed"]:
+        raise RuntimeError(
+            "V5 clean-matte ownership failed: "
+            f"{matte_qa['alpha_outside_semantic_pixels']} alpha pixels lie outside "
+            "their semantic masks. No bundle was published."
+        )
+    if not matte_qa["topology_gate_passed"]:
+        failure_details = summarize_topology_failures(matte_qa)
+        raise RuntimeError(
+            "V5 scaled text-matte topology diverged from its Lanczos source-alpha "
+            "reference: "
+            + " | ".join(failure_details)
+            + ". No bundle was published."
         )
     final_pixels = final_size[0] * final_size[1]
     cropped_layer_raw_bytes = sum(
@@ -356,8 +915,25 @@ def main() -> int:
     ora_path = output_dir / f"{prefix}_MASTER.ora"
     contact_path = output_dir / f"{prefix}_CONTACT_SHEET.png"
     zip_path = output_dir / f"{prefix}_LAYERS.zip"
+    guide_path = output_dir / "00_HUONG_DAN_V5.txt"
     text_path = output_dir / "TEXT_OCR.json"
     manifest_path = output_dir / "manifest.json"
+
+    guide_path.write_text(
+        "V5 - MỞ FILE NÀO?\n"
+        "==================\n\n"
+        "1. Photoshop / Photopea / Canva: mở file *_EDITABLE.psd.\n"
+        "2. Krita / GIMP: mở file *_MASTER.ora.\n"
+        "3. LAYERS: các chi tiết PNG nền trong suốt đã cắt.\n"
+        "4. MASKS: mặt nạ trắng/đen để kiểm tra biên cắt; không phải ảnh thành phẩm.\n"
+        "5. *_CONTACT_SHEET.png: xem nhanh tất cả layer trên nền caro.\n"
+        "6. TEXT_OCR.json và manifest.json: hồ sơ kỹ thuật, người dùng thường không cần sửa.\n\n"
+        "Layer chữ đã được khoét khoảng âm O/G/N, bảo vệ dấu tiếng Việt và làm mịn alpha bằng "
+        "ViTMatte cục bộ. Hãy xem MASKS ở 100% nếu cần kiểm tra biên.\n\n"
+        "V5 không thể khôi phục layer gốc đã mất trong ảnh phẳng. Nền bị che là nền tổng hợp; "
+        "hãy tắt/bật từng layer và xem ở 100% trước khi in.\n",
+        encoding="utf-8",
+    )
 
     save_color_png(composite, preview_path, output_icc)
     save_color_png(segmentation_overlay(source_rgb, layers), overlay_path, output_icc)
@@ -435,11 +1011,18 @@ def main() -> int:
             "embedded_in": "RGB/RGBA PNG artwork, OpenRaster PNG artwork and PSD document resource",
             "mask_policy": "grayscale alpha masks remain untagged; RGB ICC does not apply to alpha values",
         },
-        "models": {"sam2": sam_report, "grounding_dino": semantic_report, "ocr": ocr_report},
+        "models": {
+            "sam2": sam_report,
+            "grounding_dino": semantic_report,
+            "ocr": ocr_report,
+            "vitmatte": vitmatte_report,
+        },
         "grouping": grouping_report,
+        "matte_cleanup": matte_cleanup_report,
         "background_restoration": restoration.report,
         "hierarchy_cleanup": hierarchy_cleanup,
         "composition_qa": composition_report,
+        "matte_qa": matte_qa,
         "render_resource_qa": render_resource_report,
         "layers": layer_records,
         "formats": {"psd": psd_report, "openraster": ora_report},
@@ -454,7 +1037,10 @@ def main() -> int:
     assert_portable_bundle_manifest(manifest, output_dir)
     # LAYERS.zip is the portable raw-asset handoff, not a redundant archive of
     # the PSD, ORA and large QA previews already beside it in the bundle.
-    archive_member_policy = "manifest + TEXT_OCR.json + cropped LAYERS/*.png + MASKS/*.png"
+    archive_member_policy = (
+        "00_HUONG_DAN_V5.txt + manifest + TEXT_OCR.json + "
+        "cropped LAYERS/*.png + MASKS/*.png"
+    )
     portable_manifest = json.loads(json.dumps(manifest, ensure_ascii=False))
     portable_manifest["formats"] = {
         "layers_zip": {
@@ -467,6 +1053,7 @@ def main() -> int:
     write_json(manifest_path, portable_manifest)
     included = [
         manifest_path,
+        guide_path,
         text_path,
         *sorted((output_dir / "LAYERS").glob("*.png")),
         *sorted((output_dir / "MASKS").glob("*.png")),

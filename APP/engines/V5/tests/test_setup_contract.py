@@ -97,6 +97,7 @@ class SetupContractTests(unittest.TestCase):
         spec.loader.exec_module(module)
         models = {repo_id: (revision, digest) for repo_id, revision, digest in module.MODELS}
         segment = literal_constants(V5_DIR / "v5lib" / "segment.py")
+        matting = literal_constants(V5_DIR / "v5lib" / "matting.py")
         restore = literal_constants(V5_DIR / "v5lib" / "restore.py")
 
         self.assertEqual(
@@ -106,6 +107,17 @@ class SetupContractTests(unittest.TestCase):
         self.assertEqual(
             (segment["DINO_REVISION"], segment["DINO_WEIGHT_SHA256"]),
             models[segment["DINO_MODEL"]],
+        )
+        self.assertEqual(
+            (matting["VITMATTE_REVISION"], matting["VITMATTE_WEIGHT_SHA256"]),
+            models[matting["VITMATTE_MODEL"]],
+        )
+        self.assertEqual(
+            (
+                "53222614392e8bd24ed804fbd2f9a43c46ac3850",
+                "bda9289db1bb6762d978b42d1c62ae3f34daf7497171a347a1d09657efd788cb",
+            ),
+            models["hustvl/vitmatte-small-composition-1k"],
         )
         self.assertEqual(str(restore["LAMA_MODEL_SHA256"]), module.LAMA_SHA256)
 

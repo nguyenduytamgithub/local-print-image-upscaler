@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+import webbrowser
 from collections import Counter
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -59,6 +60,7 @@ V4_ENGINE = APP_DIR / "engines" / "V4" / "upsize_vector_v4.py"
 V4_DEEP_ENGINE = APP_DIR / "engines" / "V4" / "deep_raster_v4.py"
 V5_ENGINE = APP_DIR / "engines" / "V5" / "layer_engine_v5.py"
 V7_ENGINE = APP_DIR / "engines" / "V7" / "design_repair_v7.py"
+V7_ENGINE_DIR = V7_ENGINE.parent
 V7_MODELS = APP_DIR / "engines" / "V7" / "models"
 V7_TESSDATA = V7_MODELS / "tessdata"
 V4_DEEP_MODEL = APP_DIR / "engines" / "V3" / "models" / "Real_HAT_GAN_sharper.pth"
@@ -76,6 +78,20 @@ V3_ENGINE_FILES = (
     APP_DIR / "engines" / "V3" / "src" / "blend_outputs.py",
 )
 VERSION_FILE = ROOT_DIR / "VERSION"
+
+# V7 remains executable as a standalone script and therefore its internal
+# modules use top-level imports (``v7lib``).  Put only that engine directory on
+# the launcher import path so the shared resolver can serve old and new bundles.
+if str(V7_ENGINE_DIR) not in sys.path:
+    sys.path.insert(0, str(V7_ENGINE_DIR))
+
+from bundle_layout import (  # noqa: E402
+    TECHNICAL_DIR_NAME,
+    BundleLayoutError,
+    arrange_bundle,
+    resolve_bundle_manifest,
+    resolve_bundle_paths,
+)
 
 
 def read_app_version() -> str:
@@ -142,12 +158,16 @@ UPSCALE ẢNH GPU
    .\\upscale layers <file-hoặc-thư-mục> <n> [--max-layers 4..60]
                    [--inpaint auto|poster|lama] [--no-semantic] [--allow-huge]
 
-7. Dùng V7 phục dựng chữ hỏng/mờ/sai trên poster, có bước duyệt nội dung:
+7. Dùng V7 làm rõ toàn ảnh và phục dựng chữ hỏng/mờ/sai, có bước duyệt nội dung:
    .\\upscale repair <file-hoặc-thư-mục> <n>
                    [--review gui|defer|auto|strict]
                    [--review-file <TEXT_REVIEW.json>]
                    [--ocr-passes 1..3] [--no-language-model]
                    [--inpaint auto|poster|opencv|strict] [--allow-huge]
+
+8. Mở giao diện duyệt chữ V7 trong Chrome, không cần sửa JSON bằng tay:
+   .\\upscale review <bundle-hoặc-TEXT_REVIEW.json>
+   .\\upscale duyet  <bundle-hoặc-TEXT_REVIEW.json>
 
 Đường dẫn là thư mục thì chương trình chạy tất cả ảnh trong thư mục và
 các thư mục con với cùng một hệ số n.
@@ -166,6 +186,7 @@ Ví dụ:
    .\\upscale repair poster.png 4 --review defer
    .\\upscale repair poster.png 4 --review-file "D:\\TEXT_REVIEW.json"
    .\\upscale repair poster.png 4 --review strict --review-file "D:\\TEXT_REVIEW.json"
+   .\\upscale review "D:\\OUTPUT\\V7_REPAIR\\poster_V7_REPAIR_x4"
 
 Kết quả V2: {OUTPUT_DIR / 'V2_FAST'}
 Kết quả V3: {OUTPUT_DIR / 'V3_HIGH'}
@@ -185,18 +206,25 @@ PSD/ORA là layer raster RGB thật; OCR chỉ đặt tên hỗ trợ, không gi
 Phần nền vốn bị vật thể che được tái tạo hợp lý và được ghi rõ là nền suy đoán.
 V5 là tài liệu trung gian để sửa, không phải PDF/X hoặc CMYK giao in và không cam kết giữ DPI/khổ vật lý.
 
-V7 không chỉ phóng to. Chữ được duyệt sẽ bị gỡ khỏi bitmap nguồn, nền trong đúng
-vùng đó được dựng lại, rồi chữ Unicode sạch được vẽ trực tiếp ở kích thước cuối.
+V7 phục dựng raster trên toàn ảnh bằng Swin2SR fidelity chạy cục bộ trên GPU, không dùng
+GAN/fusion ba model. Với n=1, model vẫn suy luận native x4 rồi downsample có kiểm soát về
+kích thước gốc; với n>=2, ảnh được xuất lớn theo n. Nếu model lỗi hoặc QA từ chối, báo cáo
+trong _KY_THUAT ghi rõ fallback thay vì âm thầm gọi ảnh mờ là đã phục dựng. Pixel AI là dự
+đoán hợp lý, không phải bằng chứng cho chi tiết vốn đã mất.
+Chữ được duyệt sẽ bị gỡ khỏi bitmap nguồn, nền trong đúng vùng đó được dựng lại, rồi chữ
+Unicode sạch được vẽ trực tiếp ở kích thước cuối.
 Giá, SĐT, mã hàng, địa chỉ và mọi thay đổi chính tả luôn cần duyệt. Nếu còn vùng
 chưa duyệt hoặc QA thất bại, bundle ghi rõ REVIEW_REQUIRED/FAILED_QA và không tự
 nhận là file giao in. Khi chạy cả thư mục, V7 dùng --review defer để không mở hàng loạt cửa sổ.
-Sau khi sửa từng TEXT_REVIEW.json, chạy lại cùng lệnh thư mục để V7 tự nạp đúng review cũ.
+Mở từng bundle bằng .\\upscale review, bấm lưu trên giao diện rồi chạy lại cùng lệnh thư mục;
+V7 sẽ tự nạp đúng review cũ, không cần mở hay sửa JSON bằng tay.
 --review strict bắt buộc quyết định rõ cho mọi vùng; review được khóa bằng SHA-256 và fingerprint.
 
 Nếu khổ thành phẩm cộng bleed vượt 5.000 mm, PDF V4 tự chọn tỷ lệ 1:d nhỏ nhất và ghi rõ
 trong báo cáo kỹ thuật. Hãy thay ICC mặc định bằng profile của nhà in khi họ cung cấp.
 
-n là hệ số chiều rộng và chiều cao, từ 2 đến 20; riêng V5/V7 nhận cả n=1 để chỉnh nhẹ.
+n là hệ số chiều rộng và chiều cao, từ 2 đến 20; riêng V5/V7 nhận cả n=1. V7 n=1 giữ nguyên
+kích thước file nhưng vẫn dùng GPU để phục dựng raster; n>=2 vừa phục dựng vừa làm lớn.
 V2/V3/V4 thường dùng n=4 hoặc n=10; V5 nên dùng n=1 để sửa nhẹ hoặc n=4 khi cần canvas layer lớn.
 Cùng một lệnh chạy lại sẽ thay kết quả cũ
 một cách an toàn sau khi file mới đã render và kiểm tra xong.
@@ -353,7 +381,7 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
         raise UserError(f"Hệ số không hợp lệ: {scale_token}") from exc
     minimum_scale = 1.0 if mode in {"V5_LAYERS", "V7_REPAIR"} else MIN_SCALE
     if mode == "V7_REPAIR" and 1.0 < scale < 2.0:
-        raise UserError("V7 nhận x1 hoặc từ x2 đến x20; khoảng giữa x1 và x2 không dùng V3.")
+        raise UserError("V7 chỉ nhận đúng x1 hoặc từ x2 đến x20; không nhận hệ số nằm giữa.")
     if not (minimum_scale <= scale <= MAX_SCALE):
         raise UserError(
             f"Hệ số phải từ x{minimum_scale:g} đến x{MAX_SCALE:g}. "
@@ -451,11 +479,207 @@ def _same_canonical_path(raw: object, expected: Path) -> bool:
 
 
 def _read_bundle_manifest(bundle: Path) -> dict[str, object] | None:
+    reference = Path(bundle)
     try:
-        value = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+        if reference.is_file():
+            manifest_path = reference.resolve(strict=True)
+        else:
+            if reference.name.casefold() == TECHNICAL_DIR_NAME.casefold():
+                reference = reference.parent
+            manifest_path = resolve_bundle_manifest(reference)
+        if manifest_path is None:
+            return None
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (BundleLayoutError, OSError, ValueError, TypeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def find_chrome_executable() -> Path | None:
+    """Find Chrome without invoking a shell or trusting an arbitrary command."""
+
+    candidates: list[Path] = []
+    for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(variable)
+        if base:
+            candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    for command_name in ("chrome.exe", "chrome"):
+        located = shutil.which(command_name)
+        if located:
+            candidates.append(Path(located))
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def open_review_browser(url: str) -> bool:
+    """Prefer Google Chrome, then use the registered system browser."""
+
+    chrome = find_chrome_executable()
+    if chrome is not None:
+        try:
+            subprocess.Popen([str(chrome), "--new-window", url])
+            return True
+        except OSError:
+            pass
+    opened = bool(webbrowser.open(url, new=1))
+    if not opened:
+        print(f"Không tự mở được trình duyệt. Hãy mở liên kết cục bộ này: {url}")
+    return opened
+
+
+def _validated_review_bundle(
+    bundle: Path,
+) -> tuple[Path, Path, dict[str, object]]:
+    try:
+        paths = resolve_bundle_paths(bundle)
+    except BundleLayoutError as exc:
+        raise UserError(f"Bundle V7 không an toàn hoặc bị trùng file: {exc}") from exc
+    if paths.manifest is None or paths.review is None or paths.source is None:
+        raise UserError(
+            "Bundle V7 thiếu manifest, TEXT_REVIEW.json hoặc ảnh SOURCE; không thể mở duyệt."
+        )
+    metadata = _read_bundle_manifest(paths.manifest)
+    if metadata is None or metadata.get("pipeline") != "V7_DESIGN_REPAIR":
+        raise UserError("Manifest không chứng minh đây là bundle V7 DESIGN REPAIR.")
+    return paths.review, paths.source, metadata
+
+
+def resolve_v7_review_target(
+    raw_target: str | os.PathLike[str],
+) -> tuple[Path, Path | None, dict[str, object] | None]:
+    """Resolve a legacy/new bundle or an explicitly supplied review JSON."""
+
+    supplied = Path(raw_target).expanduser()
+    if supplied.is_symlink():
+        raise UserError(f"Không mở review qua symbolic link: {supplied}")
+    if supplied.is_dir():
+        review, source, metadata = _validated_review_bundle(supplied)
+        return review, source, metadata
+    try:
+        review_path = supplied.resolve(strict=True)
+    except OSError as exc:
+        raise UserError(f"Không tìm thấy bundle hoặc file duyệt V7: {supplied}") from exc
+    if not review_path.is_file() or review_path.suffix.casefold() != ".json":
+        raise UserError("Lệnh review/duyet cần một bundle V7 hoặc file JSON duyệt.")
+
+    parent = review_path.parent
+    probable_bundle = parent.parent if parent.name.casefold() == TECHNICAL_DIR_NAME.casefold() else parent
+    has_bundle_manifest = any(
+        candidate.is_file()
+        for candidate in (
+            probable_bundle / "manifest.json",
+            probable_bundle / TECHNICAL_DIR_NAME / "manifest.json",
+        )
+    )
+    if has_bundle_manifest:
+        canonical_review, source, metadata = _validated_review_bundle(probable_bundle)
+        if canonical_review != review_path:
+            raise UserError(
+                "File JSON đã chọn không phải TEXT_REVIEW.json được manifest của bundle chỉ định."
+            )
+        return canonical_review, source, metadata
+    # A standalone review file is allowed.  user_review.py will still require
+    # its source image to resolve inside this same directory.
+    return review_path, None, None
+
+
+def _run_v7_review_ui(review_path: Path, image_path: Path | None) -> dict[str, object]:
+    try:
+        from user_review import ReviewUIError, run_review_ui
+    except ImportError as exc:
+        raise UserError(
+            "Thiếu thành phần giao diện duyệt V7; hãy kiểm tra APP\\engines\\V7."
+        ) from exc
+    try:
+        return run_review_ui(
+            review_path,
+            image_path=image_path,
+            open_browser=open_review_browser,
+        )
+    except ReviewUIError as exc:
+        raise UserError(f"Không mở được giao diện duyệt V7: {exc}") from exc
+
+
+def _v7_rerun_command(
+    metadata: dict[str, object] | None,
+    review_path: Path,
+) -> str | None:
+    if metadata is None:
+        return None
+    is_batch = isinstance(metadata.get("batch_root"), str)
+    source = metadata.get("batch_root") if is_batch else metadata.get("original_source")
+    raw_scale = metadata.get("scale")
+    if not isinstance(source, str) or not source.strip() or "\x00" in source:
+        return None
+    if isinstance(raw_scale, bool):
+        return None
+    try:
+        scale = float(raw_scale)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(scale) or not (scale == 1.0 or 2.0 <= scale <= MAX_SCALE):
+        return None
+    # This text is copied into cmd.exe by a human. Refuse to print path data
+    # containing command metacharacters instead of turning manifest text into
+    # a copy/paste injection vector.
+    review_text = str(review_path)
+    if any(character in source + review_text for character in '&|<>^%!"\r\n'):
+        return None
+    arguments = [".\\upscale", "repair", f'"{source}"', f"{scale:g}"]
+    launcher_options = metadata.get("launcher_options")
+    options = launcher_options if isinstance(launcher_options, dict) else {}
+    if is_batch:
+        arguments.extend(["--review", "defer"])
+    else:
+        review_mode = str(options.get("review_mode", "gui"))
+        if review_mode not in {"gui", "defer", "auto", "strict"}:
+            return None
+        arguments.extend(["--review", review_mode, "--review-file", f'"{review_text}"'])
+    raw_passes = options.get("ocr_passes", 3)
+    if not isinstance(raw_passes, bool):
+        try:
+            ocr_passes = int(raw_passes)
+        except (TypeError, ValueError, OverflowError):
+            ocr_passes = 3
+        if 1 <= ocr_passes <= 3:
+            arguments.extend(["--ocr-passes", str(ocr_passes)])
+    inpaint = str(options.get("inpaint", "auto"))
+    if inpaint in {"auto", "poster", "opencv", "strict"}:
+        arguments.extend(["--inpaint", inpaint])
+    if options.get("language_model") is False:
+        arguments.append("--no-language-model")
+    if options.get("allow_huge") is True:
+        arguments.append("--allow-huge")
+    return " ".join(arguments)
+
+
+def run_v7_review_command(raw_target: str | os.PathLike[str]) -> int:
+    """Open the human review UI and print, but never execute, the rerun command."""
+
+    review_path, image_path, metadata = resolve_v7_review_target(raw_target)
+    print("\nDUYỆT CHỮ V7")
+    print(f"  File quyết định : {review_path}")
+    if image_path is not None:
+        print(f"  Ảnh đối chiếu   : {image_path}")
+    print("  Trình duyệt     : ưu tiên Google Chrome")
+    _run_v7_review_ui(review_path, image_path)
+
+    print("\nĐÃ LƯU PHẦN DUYỆT — CHƯA TỰ CHẠY LẠI ENGINE")
+    rerun = _v7_rerun_command(metadata, review_path)
+    if rerun is not None:
+        print("  Chạy đúng lệnh sau để dựng lại ảnh với nội dung vừa duyệt:")
+        print(f"  {rerun}")
+    else:
+        print("  Bundle cũ chưa có original_source/scale; hãy chạy lại lệnh repair ban đầu")
+        print(f'  và thêm: --review-file "{review_path}"')
+    return 0
 
 
 def _v7_bundle_owned_by(
@@ -509,7 +733,7 @@ def select_v7_batch_group(directory: Path, tag: str) -> Path:
     manifests = [
         value
         for path in legacy.rglob("manifest.json")
-        if (value := _read_bundle_manifest(path.parent)) is not None
+        if (value := _read_bundle_manifest(path)) is not None
     ]
     if manifests and all(_same_canonical_path(value.get("batch_root"), directory) for value in manifests):
         return Path(base_name)
@@ -519,7 +743,7 @@ def select_v7_batch_group(directory: Path, tag: str) -> Path:
         safe_manifests = [
             value
             for path in safe_group.rglob("manifest.json")
-            if (value := _read_bundle_manifest(path.parent)) is not None
+            if (value := _read_bundle_manifest(path)) is not None
         ]
         if not safe_manifests or not all(
             _same_canonical_path(value.get("batch_root"), directory) for value in safe_manifests
@@ -1857,8 +2081,14 @@ def run_v7_job(
             raise UserError(f"Không tìm thấy file duyệt V7: {review_file}")
     prior_batch_review: Path | None = None
     if batch_root is not None and review_file is None and target_dir.exists():
-        prior_batch_review = target_dir / "TEXT_REVIEW.json"
-        if not prior_batch_review.is_file() or _read_bundle_manifest(target_dir) is None:
+        try:
+            previous_paths = resolve_bundle_paths(target_dir)
+        except BundleLayoutError as exc:
+            raise UserError(
+                f"Bundle V7 batch cũ không an toàn; giữ nguyên và không ghi đè: {target_dir}: {exc}"
+            ) from exc
+        prior_batch_review = previous_paths.review
+        if prior_batch_review is None or previous_paths.manifest is None:
             raise UserError(
                 f"Bundle V7 batch cũ thiếu review/manifest; giữ nguyên và không ghi đè: {target_dir}"
             )
@@ -1877,7 +2107,7 @@ def run_v7_job(
     )
 
     print("\nTHÔNG TIN LỆNH")
-    print("  Chế độ : V7 DESIGN REPAIR (OCR đối chứng + duyệt + gỡ/vẽ lại chữ)")
+    print("  Chế độ : V7 RESTORE (làm rõ toàn ảnh + OCR/duyệt + gỡ/vẽ lại chữ)")
     print(f"  Input  : {source}")
     print(f"  Nguồn  : {source_size[0]}x{source_size[1]} px, {source_mode}")
     print(
@@ -1941,20 +2171,80 @@ def run_v7_job(
                 command.append("--no-language-model")
             subprocess.run(command, check=True, cwd=ROOT_DIR)
 
-            engine_manifest_path = staging_bundle / "manifest.json"
-            if not engine_manifest_path.is_file():
+            try:
+                engine_paths = resolve_bundle_paths(staging_bundle)
+            except BundleLayoutError as exc:
+                raise RuntimeError(f"Bundle kỹ thuật V7 không an toàn: {exc}") from exc
+            engine_manifest_path = engine_paths.manifest
+            if engine_manifest_path is None:
                 raise RuntimeError("V7 không tạo manifest kiểm định.")
             metadata = json.loads(engine_manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict):
+                raise RuntimeError("Manifest V7 phải là một JSON object.")
             if metadata.get("pipeline") != "V7_DESIGN_REPAIR":
                 raise RuntimeError("Manifest V7 sai pipeline.")
             if metadata.get("final_size") != list(final_size):
                 raise RuntimeError("Manifest V7 sai kích thước đầu ra.")
-            if metadata.get("status") not in {"PASS", "REVIEW_REQUIRED", "FAILED_QA"}:
+            try:
+                engine_scale = float(metadata.get("scale"))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError("Manifest V7 thiếu hệ số scale hợp lệ.") from exc
+            if not math.isfinite(engine_scale) or not math.isclose(
+                engine_scale,
+                scale,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                raise RuntimeError("Manifest V7 ghi sai hệ số scale.")
+            status = metadata.get("status")
+            if status not in {"PASS", "REVIEW_REQUIRED", "FAILED_QA"}:
                 raise RuntimeError("Manifest V7 thiếu trạng thái QA rõ ràng.")
-            required_patterns = ("*_REPAIRED_x*.png", "TEXT_REVIEW.json", "QA.json")
-            for pattern in required_patterns:
-                if not any(staging_bundle.glob(pattern)):
-                    raise RuntimeError(f"V7 thiếu đầu ra bắt buộc: {pattern}")
+            required_engine_files = {
+                "ảnh phục dựng": engine_paths.result,
+                "ảnh so sánh": engine_paths.comparison,
+                "ảnh nguồn chuẩn hóa": engine_paths.source,
+                "nền sạch": engine_paths.clean,
+                "QA overlay": engine_paths.overlay,
+                "TEXT_REVIEW.json": engine_paths.review,
+                "QA.json": engine_paths.qa,
+            }
+            missing_engine_files = [
+                label for label, path in required_engine_files.items() if path is None
+            ]
+            if missing_engine_files:
+                raise RuntimeError(
+                    "V7 thiếu đầu ra bắt buộc: " + ", ".join(missing_engine_files)
+                )
+            final_review_path = target_dir / TECHNICAL_DIR_NAME / "TEXT_REVIEW.json"
+            launcher_options = {
+                "review_mode": review_mode,
+                "ocr_passes": int(options.get("ocr_passes", 3)),
+                "inpaint": str(options.get("inpaint", "auto")),
+                "language_model": bool(options.get("language_model", True)),
+                "allow_huge": bool(allow_huge),
+            }
+            rerun_argv = [
+                "upscale",
+                "repair",
+                str(batch_root if batch_root is not None else source),
+                f"{scale:g}",
+                "--review",
+                "defer" if batch_root is not None else review_mode,
+            ]
+            if batch_root is None:
+                rerun_argv.extend(["--review-file", str(final_review_path)])
+            rerun_argv.extend(
+                [
+                    "--ocr-passes",
+                    str(launcher_options["ocr_passes"]),
+                    "--inpaint",
+                    str(launcher_options["inpaint"]),
+                ]
+            )
+            if not launcher_options["language_model"]:
+                rerun_argv.append("--no-language-model")
+            if launcher_options["allow_huge"]:
+                rerun_argv.append("--allow-huge")
             metadata.update(
                 {
                     "launcher": "Local Print Image Upscaler unified command",
@@ -1965,6 +2255,20 @@ def run_v7_job(
                     "normalized_stage_sha256": normalized_sha,
                     "resource_plan": resource_plan,
                     "final_bundle": str(target_dir),
+                    "scale": float(scale),
+                    "launcher_paths": {
+                        "result": (
+                            "01_KET_QUA_DA_DAT.png"
+                            if status == "PASS"
+                            else "01_XEM_TRUOC_CAN_DUYET.png"
+                        ),
+                        "review": f"{TECHNICAL_DIR_NAME}/TEXT_REVIEW.json",
+                        "qa": f"{TECHNICAL_DIR_NAME}/QA.json",
+                        "manifest": f"{TECHNICAL_DIR_NAME}/manifest.json",
+                    },
+                    "launcher_options": launcher_options,
+                    "review_argv": ["upscale", "review", str(target_dir)],
+                    "rerun_argv": rerun_argv,
                     "launcher_total_seconds": round(time.perf_counter() - started, 3),
                 }
             )
@@ -1973,6 +2277,13 @@ def run_v7_job(
                 metadata["batch_root_path_identity_sha256"] = canonical_path_identity(batch_root)
                 metadata["batch_relative_source"] = str(source.relative_to(batch_root))
             write_json_atomic(metadata, engine_manifest_path)
+            try:
+                arranged_paths = arrange_bundle(staging_bundle, str(status))
+            except BundleLayoutError as exc:
+                raise RuntimeError(f"Không thể chuẩn hóa bundle V7: {exc}") from exc
+            if arranged_paths.manifest is None:
+                raise RuntimeError("Bundle V7 đã sắp xếp nhưng thiếu manifest kỹ thuật.")
+            metadata = json.loads(arranged_paths.manifest.read_text(encoding="utf-8"))
             atomic_install_directory(staging_bundle, target_dir)
             try:
                 write_json_atomic(metadata, report_path)
@@ -1986,17 +2297,21 @@ def run_v7_job(
             shutil.rmtree(staging_bundle)
 
     total_seconds = time.perf_counter() - started
-    manifest = json.loads((target_dir / "manifest.json").read_text(encoding="utf-8"))
+    final_paths = resolve_bundle_paths(target_dir)
+    if final_paths.manifest is None or final_paths.result is None:
+        raise RuntimeError("Bundle V7 đã publish nhưng resolver không tìm thấy kết quả.")
+    manifest = json.loads(final_paths.manifest.read_text(encoding="utf-8"))
     print("\nHOÀN TẤT V7")
     print(f"  Trạng thái    : {manifest['status']}")
-    print(f"  Ảnh phục dựng : {next(target_dir.glob('*_REPAIRED_x*.png'))}")
-    print(f"  File duyệt    : {target_dir / 'TEXT_REVIEW.json'}")
-    print(f"  Báo cáo QA    : {target_dir / 'QA.json'}")
+    print(f"  Ảnh phục dựng : {final_paths.result}")
+    print(f"  File duyệt    : {final_paths.review}")
+    print(f"  Báo cáo QA    : {final_paths.qa}")
     print(f"  Thời gian     : {total_seconds:.1f} giây")
     if manifest["status"] != "PASS":
-        print("  Lưu ý         : chưa được gọi là bản giao in; xem TEXT_REVIEW.json và QA.json.")
+        print(f"  Duyệt dễ dàng : .\\upscale review \"{target_dir}\"")
+        print("  Lưu ý         : chưa được gọi là bản giao in; cần duyệt chữ rồi chạy lại repair.")
     elif int(manifest.get("qa", {}).get("ocr_advisory_count", 0)) > 0:
-        print("  Lưu ý         : QA cứng đạt; OCR đọc ngược còn cảnh báo dấu. Xem BEFORE_AFTER.png.")
+        print("  Lưu ý         : QA cứng đạt; OCR đọc ngược còn cảnh báo dấu. Xem 02_SO_SANH.png.")
     return target_dir
 
 
@@ -2159,7 +2474,7 @@ def run_batch(
         if v4_options.get("review_file"):
             raise UserError(
                 "--review-file chỉ áp dụng cho một ảnh. Với thư mục, chạy lượt đầu "
-                "--review defer rồi duyệt từng TEXT_REVIEW.json."
+                "--review defer rồi dùng .\\upscale review <bundle> cho từng kết quả."
             )
         if v4_options.get("review") == "gui":
             v4_options = dict(v4_options)
@@ -2231,9 +2546,14 @@ def run_batch(
 
 def main(argv: list[str] | None = None) -> int:
     configure_console()
-    mode, file_token, scale, allow_huge, v4_options = parse_command(
-        list(sys.argv[1:] if argv is None else argv)
-    )
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0].casefold() in {"review", "duyet"}:
+        if len(arguments) != 2:
+            raise UserError(
+                "Cú pháp: .\\upscale review <bundle-hoặc-TEXT_REVIEW.json>"
+            )
+        return run_v7_review_command(arguments[1])
+    mode, file_token, scale, allow_huge, v4_options = parse_command(arguments)
     source = resolve_source(file_token)
     with gpu_job_lock():
         if source.is_dir():

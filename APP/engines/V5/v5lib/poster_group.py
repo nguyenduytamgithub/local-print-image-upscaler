@@ -969,6 +969,11 @@ def _copy_layer(layer: LayerSpec) -> LayerSpec:
         label=layer.label,
         text=layer.text,
         metadata=copy.deepcopy(layer.metadata),
+        alpha_matte=(
+            None
+            if layer.alpha_matte is None
+            else np.asarray(layer.alpha_matte, dtype=np.float32).copy()
+        ),
     )
 
 

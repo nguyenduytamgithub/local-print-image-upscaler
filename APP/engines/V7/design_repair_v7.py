@@ -13,12 +13,14 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 import time
 import unicodedata
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,6 +29,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageCms, ImageOps
 
+from raster_restore import (
+    TRUTH_NOTICE as RASTER_TRUTH_NOTICE,
+    RasterRestoreConfig,
+    SuperResolutionBackend,
+    V3SubprocessBackend,
+    restore_raster,
+)
+from user_review import ReviewUIError, run_review_ui
 from v7lib.background import (
     BackgroundRestoreError,
     BackgroundRestoreResult,
@@ -53,7 +63,6 @@ from v7lib.review import (
     load_review_document,
     region_fingerprint,
     resolve_review,
-    review_in_tk,
     write_review_document,
 )
 from v7lib.textnorm import build_conservative_proposal, normalize_nfc
@@ -79,6 +88,42 @@ MAX_SCALE = 20.0
 LANGUAGE_REVISION = "61596a71696ba360ae828f9db3806610afedf6d3"
 
 
+def open_review_browser(url: str) -> bool:
+    """Open the V7 review page in Chrome when it is installed.
+
+    This is intentionally local-only: ``run_review_ui`` binds to 127.0.0.1 and
+    protects the session with a random token.  The generic browser fallback is
+    retained for machines that do not have Chrome.
+    """
+
+    candidates: list[Path] = []
+    for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(variable)
+        if base:
+            candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    for command_name in ("chrome.exe", "chrome"):
+        located = shutil.which(command_name)
+        if located:
+            candidates.append(Path(located))
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        if not candidate.is_file():
+            continue
+        try:
+            subprocess.Popen([str(candidate.resolve()), "--new-window", url])
+            return True
+        except OSError:
+            continue
+    opened = bool(webbrowser.open(url, new=1))
+    if not opened:
+        print(f"  Không tự mở được trình duyệt; hãy mở liên kết cục bộ này: {url}")
+    return opened
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="V7 reviewable design/text restoration")
     parser.add_argument("input", type=Path)
@@ -91,6 +136,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--review-file", type=Path)
     parser.add_argument("--ocr-passes", type=int, choices=(1, 2, 3), default=3)
     parser.add_argument("--inpaint", choices=("auto", "poster", "opencv", "strict"), default="auto")
+    parser.add_argument(
+        "--raster-restore",
+        choices=("auto", "off", "strong"),
+        default="auto",
+        help="PRINT_FAITHFUL clean-raster restoration; OCR still uses the original source.",
+    )
     parser.add_argument("--no-language-model", action="store_true")
     parser.add_argument("--v3-python", type=Path)
     parser.add_argument("--v3-engine", type=Path)
@@ -972,6 +1023,137 @@ def upscale_clean_base(
         }
 
 
+def restore_clean_raster_base(
+    clean_source: Image.Image,
+    *,
+    scale: float,
+    mode: str,
+    v3_python: Path | None,
+    v3_engine: Path | None,
+    icc_profile: bytes,
+    sr_backend: SuperResolutionBackend | None = None,
+) -> tuple[Image.Image, dict[str, object], list[str]]:
+    """Build the final clean raster without changing OCR/source geometry.
+
+    ``off`` preserves the previous V7 clean-base path. ``auto`` and ``strong``
+    use only the fidelity-oriented Swin2SR checkpoint through a single-model V3
+    subprocess; neither mode invokes the GAN/frequency-fusion master.
+    """
+
+    if mode not in {"auto", "off", "strong"}:
+        raise ValueError("raster restore mode must be auto, off or strong")
+    if mode == "off":
+        legacy, legacy_report = upscale_clean_base(
+            clean_source,
+            scale=scale,
+            python=v3_python,
+            engine=v3_engine,
+            icc_profile=icc_profile,
+        )
+        return legacy, {
+            "schema": "local-print-image-upscaler/raster-restore-integration/1",
+            "mode": "off",
+            "profile": "DISABLED_LEGACY_V7_BASE",
+            "status": "DISABLED",
+            "legacy_upscale": legacy_report,
+            "truth_notice": RASTER_TRUTH_NOTICE,
+        }, []
+
+    profile_settings: dict[str, object] = {}
+    if mode == "strong":
+        profile_settings.update(
+            {
+                "deblur_strength": 0.34,
+                "deblur_iterations": 4,
+                "denoise_strength": 0.68,
+                "detail_strength": 0.34,
+            }
+        )
+    config = RasterRestoreConfig(
+        scale=scale,
+        enable_deblur=True,
+        enable_denoise=True,
+        enable_detail=True,
+        enable_sr=True,
+        enable_sr_x1=True,
+        tile=512,
+        overlap=128,
+        dtype="auto",
+        model_key="swin2sr-fidelity",
+        **profile_settings,
+    )
+    backend = sr_backend
+    backend_setup_warning: str | None = None
+    if backend is None:
+        try:
+            v3_root = (
+                v3_engine.resolve().parent
+                if v3_engine is not None
+                else Path(__file__).resolve().parent.parent / "V3"
+            )
+            backend = V3SubprocessBackend.from_local(
+                v3_root,
+                mode="single",
+                verify_selected_model=True,
+                python=v3_python,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            backend_setup_warning = (
+                f"Local PRINT_FAITHFUL raster backend unavailable ({type(exc).__name__}: {exc}); "
+                "using guarded classical/Lanczos fallback."
+            )
+            backend = None
+
+    restored = restore_raster(
+        clean_source,
+        config,
+        sr_backend=backend,
+        progress=lambda message: print(f"  {message}", flush=True),
+    )
+    result = restored.image.convert("RGB")
+    expected_size = tuple(int(round(value * scale)) for value in clean_source.size)
+    if result.size != expected_size:
+        raise RuntimeError(
+            f"Raster restoration returned {result.size}, expected {expected_size}."
+        )
+    report = dict(restored.report)
+    report["integration"] = {
+        "mode": mode,
+        "profile": "PRINT_FAITHFUL",
+        "model_key": "swin2sr-fidelity",
+        "backend_mode": "single",
+        "gan_or_three_model_fusion": False,
+        "ocr_geometry_policy": "OCR and source-scale typography QA use the original source raster",
+        "x1_policy": "native Swin2SR x4 prediction then guarded Lanczos back-downsample to x1",
+    }
+    warnings: list[str] = []
+    if backend_setup_warning:
+        warnings.append(backend_setup_warning)
+    sr_report = report.get("super_resolution", {})
+    if isinstance(sr_report, dict) and not bool(sr_report.get("accepted", False)):
+        guard_report = sr_report.get("guard", {})
+        guard_reasons = (
+            guard_report.get("reasons", []) if isinstance(guard_report, dict) else []
+        )
+        guard_reason = (
+            ", ".join(str(item) for item in guard_reasons)
+            if isinstance(guard_reasons, list) and guard_reasons
+            else None
+        )
+        reason = str(
+            sr_report.get("error")
+            or sr_report.get("reason")
+            or guard_reason
+            or "quality guard rejected SR"
+        )
+        warnings.append(
+            "PRINT_FAITHFUL Swin2SR was not accepted; final raster uses the guarded "
+            f"classical/Lanczos fallback. Reason: {reason}"
+        )
+    report["integration_warnings"] = warnings
+    return result, report, warnings
+
+
 def _box_iou(first: Iterable[int], second: Iterable[int]) -> float:
     ax0, ay0, ax1, ay1 = (int(value) for value in first)
     bx0, by0, bx1, by1 = (int(value) for value in second)
@@ -1166,7 +1348,18 @@ def main() -> int:
         )
     write_review_document(review_document, review_path)
     if args.review_mode == "gui" and not args.review_file:
-        review_document = review_in_tk(source_asset, review_document, review_path)
+        print(
+            "  Mở trang duyệt chữ đơn giản trong Chrome; file JSON kỹ thuật được giữ ở phía sau...",
+            flush=True,
+        )
+        try:
+            review_document = run_review_ui(
+                review_path,
+                image_path=source_asset,
+                open_browser=open_review_browser,
+            )
+        except ReviewUIError as exc:
+            raise RuntimeError(f"Không mở được giao diện duyệt chữ V7: {exc}") from exc
     replacements, kept, unresolved = resolve_review(regions, review_document)
 
     print("  V7 bước 3/6: tách đúng nét chữ cũ và kiểm tra mask...", flush=True)
@@ -1328,13 +1521,27 @@ def main() -> int:
         }
         qa_overlay = source_rgb.copy()
 
-    clean_base, upscale_report = upscale_clean_base(
+    clean_base, raster_restore_report, raster_restore_warnings = restore_clean_raster_base(
         clean_source_image,
         scale=args.scale,
-        python=args.v3_python.resolve() if args.v3_python else None,
-        engine=args.v3_engine.resolve() if args.v3_engine else None,
+        mode=args.raster_restore,
+        v3_python=args.v3_python.resolve() if args.v3_python else None,
+        v3_engine=args.v3_engine.resolve() if args.v3_engine else None,
         icc_profile=output_icc,
     )
+    if args.raster_restore == "off":
+        legacy_upscale = raster_restore_report.get("legacy_upscale", {})
+        upscale_report = (
+            dict(legacy_upscale) if isinstance(legacy_upscale, dict) else {}
+        )
+    else:
+        sr_summary = raster_restore_report.get("super_resolution", {})
+        upscale_report = {
+            "pipeline": "V7_PRINT_FAITHFUL_RASTER_RESTORE",
+            "status": raster_restore_report.get("status"),
+            "final_size": raster_restore_report.get("final_size", list(final_size)),
+            "super_resolution": dict(sr_summary) if isinstance(sr_summary, dict) else {},
+        }
     print("  V7 bước 5/6: vẽ chữ đã duyệt trực tiếp ở độ phân giải cuối...", flush=True)
     repaired, final_alpha, final_render_records, final_renders = render_regions(
         clean_base,
@@ -1443,14 +1650,32 @@ def main() -> int:
         },
     )
 
+    sr_status_report = raster_restore_report.get("super_resolution", {})
+    raster_prediction_accepted = bool(
+        sr_status_report.get("accepted", False)
+        if isinstance(sr_status_report, dict)
+        else False
+    )
+    raster_restore_review_required = (
+        args.raster_restore != "off" and not raster_prediction_accepted
+    )
     if not bool(qa_report.get("passed", False)) or not bool(
         typography_gate.get("passed", False)
     ):
         status = "FAILED_QA"
-    elif unresolved or no_text_detected:
+    elif unresolved or no_text_detected or raster_restore_review_required:
         status = "REVIEW_REQUIRED"
     else:
         status = "PASS"
+    ocr_advisories = (
+        [
+            "Independent OCR did not reproduce every approved accent exactly. "
+            "The approved NFC text and font glyph coverage passed hard QA; inspect "
+            "BEFORE_AFTER.png as the normal final visual proof."
+        ]
+        if int(backcheck.get("advisory_count", 0)) > 0
+        else []
+    )
     qa_document = {
         "schema": "local-print-image-upscaler/v7-qa/1",
         "status": status,
@@ -1461,21 +1686,15 @@ def main() -> int:
             region_id: mask_results[region_id].report for region_id in sorted(mask_results)
         },
         "background": restoration.report,
+        "raster_restore": raster_restore_report,
+        "raster_restore_review_required": raster_restore_review_required,
         "upscale": upscale_report,
         "unresolved_region_ids": unresolved,
         "no_text_detected": no_text_detected,
         "kept_region_ids": sorted(kept),
         "rejected_mask_region_ids": rejected_masks,
         "final_text_alpha_pixels": int(final_alpha.sum()),
-        "advisories": (
-            [
-                "Independent OCR did not reproduce every approved accent exactly. "
-                "The approved NFC text and font glyph coverage passed hard QA; inspect "
-                "BEFORE_AFTER.png as the normal final visual proof."
-            ]
-            if int(backcheck.get("advisory_count", 0)) > 0
-            else []
-        ),
+        "advisories": [*raster_restore_warnings, *ocr_advisories],
     }
     qa_path = output_dir / "QA.json"
     qa_path.write_text(json.dumps(qa_document, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1494,7 +1713,26 @@ def main() -> int:
         "Pixels hidden below old text do not exist in a flat bitmap; the clean background is a bounded synthesis.",
         "The SVG contains real editable Unicode text but does not redistribute Windows font files.",
         "The repaired PNG is the raster placement authority; another machine may substitute SVG fonts.",
+        RASTER_TRUTH_NOTICE,
     ]
+    sr_manifest_accepted = raster_prediction_accepted
+    raster_model_manifest: dict[str, object]
+    if args.raster_restore == "off":
+        raster_model_manifest = {
+            "profile": "DISABLED_LEGACY_V7_BASE",
+            "model": None,
+            "backend_mode": None,
+            "gan_or_three_model_fusion": False,
+            "accepted": False,
+        }
+    else:
+        raster_model_manifest = {
+            "profile": "PRINT_FAITHFUL",
+            "model": "Swin2SR real-world PSNR/fidelity x4",
+            "backend_mode": "single",
+            "gan_or_three_model_fusion": False,
+            "accepted": sr_manifest_accepted,
+        }
     manifest = build_bundle_manifest(
         pipeline="V7_DESIGN_REPAIR",
         app_version=args.app_version,
@@ -1510,6 +1748,9 @@ def main() -> int:
             "status": status,
             "report": qa_path.name,
             "ocr_advisory_count": int(backcheck.get("advisory_count", 0)),
+            "raster_restore_warning_count": len(raster_restore_warnings),
+            "raster_restore_status": raster_restore_report.get("status"),
+            "raster_restore_review_required": raster_restore_review_required,
             "typography_review_count": len(
                 typography_gate.get("requires_review_region_ids", [])
             ),
@@ -1518,6 +1759,7 @@ def main() -> int:
             "ocr": "PaddleOCR 3.7 / PP-OCRv6 medium official local inference model",
             "ocr_vote": "Tesseract 5 Vietnamese tessdata_best when installed",
             "language": language_report,
+            "raster_restore": raster_model_manifest,
         },
         limitations=limitations,
         extra={
@@ -1531,6 +1773,7 @@ def main() -> int:
                 "unresolved_count": len(unresolved),
             },
             "background": restoration.report,
+            "raster_restore": raster_restore_report,
             "upscale": upscale_report,
             "typography": final_render_records,
             "svg": svg_report,
@@ -1544,6 +1787,8 @@ def main() -> int:
     write_manifest_atomic(manifest, output_dir / "manifest.json")
 
     print(f"  V7 status: {status}")
+    for warning in raster_restore_warnings:
+        print(f"  Raster restore warning: {warning}")
     if status == "REVIEW_REQUIRED":
         if no_text_detected:
             print("  No text was detected; V7 refuses to claim a repaired final. Inspect the source manually.")

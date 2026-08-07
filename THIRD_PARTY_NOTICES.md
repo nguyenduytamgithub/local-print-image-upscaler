@@ -32,6 +32,7 @@ checkpoints. Their copyrights and licenses remain with their respective authors.
 | uv | <https://github.com/astral-sh/uv> | MIT OR Apache-2.0 |
 | SAM 2.1 | <https://github.com/facebookresearch/sam2> | Apache-2.0 |
 | Grounding DINO | <https://github.com/IDEA-Research/GroundingDINO> | Apache-2.0 |
+| ViTMatte | <https://github.com/hustvl/ViTMatte> | MIT; checkpoint/model-card terms also apply |
 | LaMa | <https://github.com/advimman/lama> | Apache-2.0 |
 | simple-lama-inpainting adapter | <https://github.com/enesmsahin/simple-lama-inpainting> | Apache-2.0 |
 | Tesseract OCR | <https://github.com/tesseract-ocr/tesseract> | Apache-2.0 |
@@ -46,8 +47,8 @@ Retained license texts and source/license records for the local engines are unde
 
 - `APP/engines/V2/THIRD_PARTY_LICENSES/`
 - `APP/engines/V3/THIRD_PARTY_LICENSES/`
-- `APP/engines/V5/SOURCES.md` records pinned SAM 2.1/Grounding DINO revisions, LaMa and
-  Vietnamese OCR hashes, plus the PSD/OpenRaster format policy.
+- `APP/engines/V5/SOURCES.md` records pinned SAM 2.1/Grounding DINO revisions, ViTMatte-S,
+  LaMa and Vietnamese OCR hashes, plus the PSD/OpenRaster format policy.
 - `APP/engines/V7/SOURCES.md` records the PP-OCRv6 sources, Unicode/OpenType references and
   the exact Vietnamese proposal-model revision; `MODEL_SHA256SUMS.txt` records downloaded assets.
 

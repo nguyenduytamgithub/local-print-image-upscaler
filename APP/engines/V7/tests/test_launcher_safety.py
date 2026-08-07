@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import subprocess
 import sys
@@ -33,6 +34,53 @@ def _write_owner_manifest(
     if batch_root is not None:
         payload["batch_root"] = str(batch_root.resolve())
     (bundle / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_complete_engine_bundle(
+    bundle: Path,
+    review_bytes: bytes,
+    *,
+    status: str = "REVIEW_REQUIRED",
+    final_size: tuple[int, int] = (2, 2),
+) -> None:
+    bundle.mkdir(parents=True, exist_ok=True)
+    raster_names = (
+        "poster_SOURCE_NORMALIZED.png",
+        "poster_CLEAN_BASE_x1.png",
+        "poster_REPAIRED_x1.png",
+        "poster_QA_OVERLAY.png",
+        "poster_BEFORE_AFTER.png",
+    )
+    for index, name in enumerate(raster_names):
+        Image.new("RGB", final_size, (240 - index, 240, 240)).save(bundle / name)
+    review_document = json.loads(review_bytes.decode("utf-8"))
+    review_document.setdefault("source", "poster_SOURCE_NORMALIZED.png")
+    (bundle / "TEXT_REVIEW.json").write_text(
+        json.dumps(review_document, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (bundle / "QA.json").write_text(
+        json.dumps({"status": status}),
+        encoding="utf-8",
+    )
+    assets = [path for path in bundle.iterdir() if path.is_file()]
+    manifest = {
+        "pipeline": "V7_DESIGN_REPAIR",
+        "final_size": list(final_size),
+        "scale": 1.0,
+        "status": status,
+        "review_required": status != "PASS",
+        "qa": {"status": status, "report": "QA.json"},
+        "assets": [
+            {
+                "path": path.name,
+                "bytes": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for path in assets
+        ],
+    }
+    (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 class V7OutputSelectionTests(unittest.TestCase):
@@ -276,6 +324,9 @@ class V7BatchReviewSnapshotTests(unittest.TestCase):
                 / "poster_V7_REPAIR_x1"
             )
             _write_owner_manifest(target, source, batch_root=batch_root)
+            prior_technical = target / "_KY_THUAT"
+            prior_technical.mkdir()
+            (target / "manifest.json").replace(prior_technical / "manifest.json")
             prior_review = {
                 "schema": "local-print-image-upscaler/v7-text-review/1",
                 "source_sha256": "a" * 64,
@@ -290,7 +341,7 @@ class V7BatchReviewSnapshotTests(unittest.TestCase):
             prior_bytes = json.dumps(prior_review, ensure_ascii=False, indent=2).encode(
                 "utf-8"
             )
-            (target / "TEXT_REVIEW.json").write_bytes(prior_bytes)
+            (prior_technical / "TEXT_REVIEW.json").write_bytes(prior_bytes)
             captured: dict[str, object] = {}
 
             def fake_engine_run(
@@ -305,21 +356,7 @@ class V7BatchReviewSnapshotTests(unittest.TestCase):
                 captured["snapshot"] = snapshot
                 captured["bytes"] = snapshot.read_bytes()
                 staging = Path(command[5])
-                staging.mkdir(parents=True)
-                (staging / "manifest.json").write_text(
-                    json.dumps(
-                        {
-                            "pipeline": "V7_DESIGN_REPAIR",
-                            "final_size": [2, 2],
-                            "status": "REVIEW_REQUIRED",
-                            "qa": {},
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-                (staging / "poster_REPAIRED_x1.png").write_bytes(b"png-proof")
-                (staging / "TEXT_REVIEW.json").write_bytes(snapshot.read_bytes())
-                (staging / "QA.json").write_text("{}", encoding="utf-8")
+                _write_complete_engine_bundle(staging, snapshot.read_bytes())
                 return subprocess.CompletedProcess(command, 0)
 
             resource_plan = {
@@ -358,8 +395,110 @@ class V7BatchReviewSnapshotTests(unittest.TestCase):
             snapshot = captured["snapshot"]
             self.assertIsInstance(snapshot, Path)
             self.assertEqual(snapshot.name, "previous_TEXT_REVIEW.json")
-            self.assertNotEqual(snapshot, target / "TEXT_REVIEW.json")
-            self.assertEqual((target / "TEXT_REVIEW.json").read_bytes(), prior_bytes)
+            published_review = target / "_KY_THUAT" / "TEXT_REVIEW.json"
+            self.assertNotEqual(snapshot, published_review)
+            published = json.loads(published_review.read_text(encoding="utf-8"))
+            self.assertEqual(published["regions"], prior_review["regions"])
+            self.assertEqual(published["source"], "SOURCE.png")
+            self.assertTrue((target / "01_XEM_TRUOC_CAN_DUYET.png").is_file())
+            self.assertFalse((target / "manifest.json").exists())
+            self.assertEqual(
+                {entry.name for entry in target.iterdir()},
+                {"01_XEM_TRUOC_CAN_DUYET.png", "02_SO_SANH.png", "_KY_THUAT"},
+            )
+            published_manifest = json.loads(
+                (target / "_KY_THUAT" / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(published_manifest["original_source"], str(source))
+            self.assertEqual(published_manifest["scale"], 1.0)
+            self.assertEqual(published_manifest["rerun_argv"][2], str(batch_root))
+            self.assertNotIn("--review-file", published_manifest["rerun_argv"])
+
+
+class V7IntegratedPublishRollbackTests(unittest.TestCase):
+    def test_friendly_staging_failure_restores_previous_user_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            output = root / "OUTPUT"
+            fake_app = root / "APP"
+            work = fake_app / "work"
+            work.mkdir(parents=True)
+            source = root / "source" / "poster.png"
+            source.parent.mkdir()
+            Image.new("RGB", (2, 2), "white").save(source)
+            python_v7 = root / "python-v7.exe"
+            engine_v7 = root / "design-repair-v7.py"
+            python_v7.write_bytes(b"runtime")
+            engine_v7.write_text("engine", encoding="utf-8")
+            target = output / "V7_REPAIR" / "poster_V7_REPAIR_x1"
+            _write_owner_manifest(target, source)
+            old_marker = target / "KEEP_OLD.txt"
+            old_marker.write_text("old bundle", encoding="utf-8")
+
+            def fake_engine_run(
+                command: list[str],
+                *,
+                check: bool,
+                cwd: Path,
+            ) -> subprocess.CompletedProcess[str]:
+                self.assertTrue(check)
+                _write_complete_engine_bundle(
+                    Path(command[5]),
+                    json.dumps({"regions": []}).encode("utf-8"),
+                )
+                return subprocess.CompletedProcess(command, 0)
+
+            resource_plan = {
+                "source_megapixels": 0.0,
+                "output_megapixels": 0.0,
+                "estimated_peak_ram_gib": 0.0,
+                "estimated_working_disk_gib": 0.0,
+            }
+            real_replace = upscale_cli.os.replace
+            saw_friendly_stage = False
+
+            def fail_final_publish(from_path: object, to_path: object) -> None:
+                nonlocal saw_friendly_stage
+                source_path = Path(from_path)
+                destination = Path(to_path)
+                if destination == target.resolve() and source_path.name.startswith(
+                    f".{target.name}.new-"
+                ):
+                    saw_friendly_stage = (source_path / "01_XEM_TRUOC_CAN_DUYET.png").is_file()
+                    self.assertFalse((source_path / "manifest.json").exists())
+                    raise OSError("simulated final publish failure")
+                real_replace(from_path, to_path)
+
+            with (
+                patch.object(upscale_cli, "OUTPUT_DIR", output),
+                patch.object(upscale_cli, "APP_DIR", fake_app),
+                patch.object(upscale_cli, "WORK_DIR", work),
+                patch.object(upscale_cli, "ROOT_DIR", root),
+                patch.object(upscale_cli, "PYTHON_V7", python_v7),
+                patch.object(upscale_cli, "V7_ENGINE", engine_v7),
+                patch.object(upscale_cli, "V7_TESSDATA", root / "tessdata"),
+                patch.object(
+                    upscale_cli,
+                    "validate_v7_resource_plan",
+                    return_value=resource_plan,
+                ),
+                patch.object(upscale_cli.subprocess, "run", side_effect=fake_engine_run),
+                patch.object(upscale_cli.os, "replace", side_effect=fail_final_publish),
+            ):
+                with self.assertRaises(OSError):
+                    upscale_cli.run_v7_job(
+                        source,
+                        1.0,
+                        False,
+                        {"review": "defer", "ocr_passes": 1, "language_model": False},
+                    )
+
+            self.assertTrue(saw_friendly_stage)
+            self.assertEqual(old_marker.read_text(encoding="utf-8"), "old bundle")
+            self.assertTrue((target / "manifest.json").is_file())
+            self.assertFalse(upscale_cli._directory_publish_journal(target).exists())
+            self.assertEqual(list(target.parent.glob(f".{target.name}.old-*")), [])
+            self.assertEqual(list(target.parent.glob(f".{target.name}.new-*")), [])
 
 
 if __name__ == "__main__":

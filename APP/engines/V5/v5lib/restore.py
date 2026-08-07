@@ -51,11 +51,29 @@ def visible_union(layer_masks: list[np.ndarray]) -> np.ndarray:
     return result
 
 
-def make_soft_alpha(mask: np.ndarray, edge_width: float = 2.5) -> np.ndarray:
-    """Return the semantic core matte; final edge alpha is solved during compositing."""
+def make_soft_alpha(mask: np.ndarray, edge_width: float = 1.35) -> np.ndarray:
+    """Create an inside-only antialiased matte without expanding ownership.
 
-    del edge_width
-    return mask.astype(np.float32)
+    A flattened bitmap has background-preblended contour pixels.  Giving the
+    innermost boundary a sub-pixel coverage estimate lets the renderer solve a
+    decontaminated foreground colour against the reconstructed lower layer.
+    Alpha is always exactly zero outside ``mask``; semantic ownership remains
+    the hard ceiling.
+    """
+
+    binary = np.asarray(mask, dtype=bool)
+    if binary.ndim != 2:
+        raise ValueError("mask must be a two-dimensional array.")
+    if not math.isfinite(float(edge_width)) or edge_width <= 0:
+        raise ValueError("edge_width must be a finite positive number.")
+    if not binary.any():
+        return np.zeros(binary.shape, dtype=np.float32)
+    distance = cv2.distanceTransform(
+        binary.astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE
+    )
+    alpha = np.clip(distance / float(edge_width), 0.0, 1.0).astype(np.float32)
+    alpha[~binary] = 0.0
+    return alpha
 
 
 def _component_ring(component: np.ndarray, radius: int) -> np.ndarray:

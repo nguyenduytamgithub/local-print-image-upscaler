@@ -2,8 +2,9 @@
 
 V5 turns one flat bitmap into a deliberately small set of **real raster layers**.
 It combines official SAM 2.1 masks, Grounding DINO semantic hints, Tesseract
-line geometry, deterministic grouping and background reconstruction. It is
-separate from V2, V3 and V4 and does not modify their code or outputs.
+line geometry, deterministic grouping, pinned ViTMatte-S text-edge refinement
+and background reconstruction. It is separate from V2, V3 and V4 and does not
+modify their code or outputs.
 
 V5 classifies poster/graphic content separately from photographic or textured
 content. Poster masks are grouped into panels, rows, objects and parent-child
@@ -72,6 +73,9 @@ before layer inference so the normalized input is unambiguous.
   determines pixel boundaries; DINO labels are not trusted as masks.
 - **Tesseract 5 + pinned `tessdata_best` `vie`** supplies Vietnamese line boxes
   and OCR metadata. Recognition never creates native text objects.
+- **Pinned ViTMatte-S Composition-1k** estimates fractional alpha only along
+  already-clean raster-text boundaries. Deterministic colour/topology rules,
+  not ViTMatte, own counters, apertures, accents and the outer silhouette.
 - **LaMa** fills plausible photographic texture only when selected. Poster
   mode instead favors deterministic colour, gradient and structural fill.
 
@@ -81,6 +85,79 @@ The normalized sRGB profile is embedded byte-for-byte in every RGB/RGBA PNG,
 all colour PNG members of the ORA and the PSD document ICC resource. Linear
 `L` alpha masks intentionally remain untagged because an RGB profile does not
 describe alpha values.
+
+## Clean-matte delivery policy
+
+V5 separates **proposal area** from **editable ownership**. Colour-guided halo
+expansion and the wider inpainting work radius may help grouping/restoration,
+but neither is allowed to enlarge an exported object alpha. For object-like
+layers, V5 resolves the exact recorded `sam_NNNN_cc_NNN` connected components
+from the original SAM output and discards unanchored islands. Raster text keeps
+separate Vietnamese accents while rejecting long panel/frame rules and isolated
+specks. The renderer then clips every non-zero alpha pixel to the final semantic
+ownership map; shadows or neighbouring artwork outside it stay on the lower
+layer instead of travelling with the object.
+
+Raster text receives a second, deterministic negative-space pass before any
+neural matting. V5 estimates the local panel/background colour in CIE Lab from
+a ring around the text proposal, preserves background-distant source-ink cores,
+and subtracts panel-coloured proposal pixels even when they lie inside one
+connected SAM/OCR region. This opens O/0 counters, G/C apertures and the
+negative spaces around N-like diagonal strokes instead of blindly filling every
+hole. If the colour evidence is weak or the proposed removal is excessive, V5
+falls back to the conservative text mask rather than deleting uncertain ink.
+
+Detached Vietnamese marks need the opposite protection. V5 may restore a
+compact source-colour component missed by the proposal only when it aligns
+above or below a glyph-sized anchor and its Lab colour agrees with that anchor.
+Long panel rules, remote specks and colour-mismatched fragments are ineligible;
+the manifest records recovered accent components and protected-source-ink
+recall.
+
+Only after that topology is fixed does V5 run
+`hustvl/vitmatte-small-composition-1k` at revision
+`53222614392e8bd24ed804fbd2f9a43c46ac3850`, with verified
+`model.safetensors` SHA-256
+`BDA9289DB1BB6762D978B42D1C62AE3F34DAF7497171A347A1D09657EFD788CB`.
+ViTMatte-S receives a narrow trimap for each text crop. Sure-foreground ink and
+all removed negative space are hard constraints, and its result is clipped back
+inside the clean source topology. It can estimate fractional pixel coverage;
+it cannot refill an O, close a G, invent a remote component or change wording.
+CUDA is used when available, including the supported RTX 3060 path; otherwise
+the same pinned model runs on CPU more slowly. No artwork or inference request
+is sent to a model service.
+
+Before resizing or export, V5 also renders an exact x1 stack and audits the
+alpha that the colour-recomposition solver will actually publish. A lone
+high-alpha text pixel is reassigned to its parent only when its source matte is
+low, local Lab evidence matches the surrounding background, and it does not
+match a reliable glyph-body palette. The stack is then rebuilt and checked
+again. This closes the gap between a clean model matte and the final PNG/PSD
+alpha while protecting punctuation and Vietnamese marks; automatic removal is
+hard-capped at two pixels per layer and is recorded in `manifest.json`.
+
+At `n>1`, the fractional source matte is resampled with Lanczos and restricted
+to a one-source-pixel antialias envelope around the same topology. This avoids
+nearest-neighbour x4 blocks without turning nearby panel lines or shadows into
+layer ownership. The exact serialized x1 alpha becomes the canonical scale
+source for every layer. V5 then solves the complete PSD/ORA stack backwards in
+its real z-order. At each step it moves the preferred inpainted lower colour
+only as far as that layer's fixed 8-bit alpha can reproduce the selected master,
+then solves an exact 8-bit foreground colour using Pillow's integer compositing
+rule. Colour correction is therefore not allowed to raise alpha, close a glyph
+counter or create a detached opaque resampling lobe.
+
+`manifest.json` records both `matte_cleanup` and `matte_qa`. Publication stops
+if a binary matte escapes semantic ownership, if source ViTMatte alpha escapes
+the clean topology, or if a scaled fractional matte escapes its audited narrow
+envelope. Every delivered alpha canvas must also equal its canonical scaled
+alpha byte-for-byte. Refined layers are compared spatially at alpha 64, 128 and
+192 using foreground-8/background-4 connectivity: missing or orphan components,
+merged glyphs, closed or invented holes, split counters and intrusion into a
+protected hole core all block publication. The source-stack preflight must
+converge without exceeding its per-layer safety cap. Flattened fidelity is still
+checked independently, so a clean-looking mask cannot pass merely by hiding a
+visual mismatch in the preview.
 
 ## Output bundle
 
@@ -116,6 +193,10 @@ The preview is a QA reference, not the editable master.
 - The masks and pixel layers are real; this is not a filename conversion.
 - OCR text remains raster pixels. A recognized label is **not** the original
   font and is never presented as editable type.
+- Colour/topology cleanup and ViTMatte improve a finite raster boundary; they
+  do not rebuild the original font outline, emit SVG paths or provide infinite
+  zoom. Truly resolution-independent text/logo output still requires verified
+  native type or deliberate vector reconstruction.
 - A flat PNG/JPEG does not contain the old layer graph. V5 infers useful groups;
   it cannot prove the original grouping.
 - No interchange standard can reconstruct a layer graph that was discarded.
@@ -149,7 +230,7 @@ The supported setup envelope is Windows 10/11 x64 with 64-bit CPython
 duplicating several gigabytes. On a clean machine, or for a CPU-only install,
 it creates the isolated `V5\.venv`. A working `nvidia-smi` selects the official
 CUDA 12.6 wheel; otherwise setup selects the official CPU wheel. CPU extraction
-works but SAM is much slower.
+works but SAM and ViTMatte-S are much slower.
 On a CPU-only machine, use V5 at `n=1`. Creating a new V3 sharpening master
 for `n>1` is CUDA-only; an already validated local cache may be reused, but a
 clean CPU machine cannot generate that cache.
@@ -163,10 +244,10 @@ grouping/naming hints are disabled. A setup performed with `-SkipTesseract`
 must also use that flag with `-CheckOnly`.
 
 `-CheckOnly` is offline: it checks the exact runtime selected by `upscale.cmd`,
-all package pins and imports, both Hugging Face revision/weight hashes, the LaMa
-hash, the Vietnamese model hash and an actual Tesseract language-load command.
-Model snapshots are pinned to exact revisions and all four large model artifacts
-are checked by SHA-256. No user artwork is uploaded.
+all package pins and imports, all three Hugging Face revision/weight hashes, the
+LaMa hash, the Vietnamese model hash and an actual Tesseract language-load
+command. Model snapshots are pinned to exact revisions and all four large model
+artifacts are checked by SHA-256. No user artwork is uploaded.
 
 Use `n=1` on a machine without the V3 super-resolution checkpoint set. `n>1`
 uses the audited V3 neural x4 master and therefore needs those three local V3

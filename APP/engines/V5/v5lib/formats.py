@@ -88,8 +88,35 @@ def resize_rgb(image_rgb: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return np.array(image, dtype=np.uint8, copy=True)
 
 
-def resize_alpha(mask: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    source_alpha = np.clip(make_soft_alpha(mask) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+def resize_alpha(
+    mask: np.ndarray,
+    size: tuple[int, int],
+    *,
+    alpha_matte: np.ndarray | None = None,
+) -> np.ndarray:
+    """Resize a binary or source-resolution fractional matte with Lanczos.
+
+    ``mask`` remains the semantic/topology authority.  A supplied matte can
+    describe sub-pixel coverage only inside that mask; malformed or escaping
+    values are rejected instead of silently contaminating an editable layer.
+    """
+
+    binary = np.asarray(mask, dtype=bool)
+    if binary.ndim != 2:
+        raise ValueError("mask must be two-dimensional.")
+    if alpha_matte is None:
+        source = make_soft_alpha(binary)
+    else:
+        source = np.asarray(alpha_matte, dtype=np.float32)
+        if source.ndim != 2 or source.shape != binary.shape:
+            raise ValueError(
+                f"alpha_matte shape {source.shape} does not match mask {binary.shape}."
+            )
+        if not np.isfinite(source).all() or (source < 0).any() or (source > 1).any():
+            raise ValueError("alpha_matte must contain finite values from 0 through 1.")
+        if np.logical_and(source > 0, ~binary).any():
+            raise ValueError("alpha_matte cannot own pixels outside its semantic mask.")
+    source_alpha = np.clip(source * 255.0 + 0.5, 0, 255).astype(np.uint8)
     image = Image.fromarray(source_alpha, "L")
     if image.size != size:
         image = image.resize(size, Image.Resampling.LANCZOS)
@@ -98,21 +125,308 @@ def resize_alpha(mask: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return array
 
 
+def resize_semantic_support(mask: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Resize ownership without inventing pixels outside the selected region."""
+
+    image = Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255, "L")
+    if image.size != size:
+        image = image.resize(size, Image.Resampling.NEAREST)
+    return np.asarray(image, dtype=np.uint8) > 0
+
+
+def resize_refined_envelope(mask: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Return the narrow legal envelope for a resampled fractional matte.
+
+    Lanczos needs a one-source-pixel runway to represent fractional coverage
+    between samples.  This envelope allows that antialiasing transition while
+    still forbidding remote panel lines, shadows, letters, or restoration
+    residue from entering a movable layer.
+    """
+
+    binary = np.asarray(mask, dtype=bool)
+    if binary.ndim != 2:
+        raise ValueError("mask must be two-dimensional.")
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    envelope = cv2.dilate(binary.astype(np.uint8), kernel).astype(bool)
+    return resize_semantic_support(envelope, size)
+
+
+def serialized_base_alpha_u8(
+    spec: LayerSpec,
+    size: tuple[int, int],
+    *,
+    matte_policy: str = "clean",
+) -> np.ndarray:
+    """Return the exact full-canvas uint8 alpha the renderer starts from.
+
+    This is the single serialization authority for planning and rendering.
+    Ordinary semantic layers are intentionally *not* binary: ``make_soft_alpha``
+    supplies their antialiased inner edge, then clean delivery clips that edge
+    to nearest-resized semantic ownership. Refined mattes instead retain their
+    Lanczos coverage only inside the narrow legal resampling envelope.
+    """
+
+    if matte_policy not in {"clean", "faithful"}:
+        raise ValueError("matte_policy must be 'clean' or 'faithful'.")
+    core_alpha = resize_alpha(
+        spec.mask,
+        size,
+        alpha_matte=spec.alpha_matte,
+    )
+    if matte_policy == "clean":
+        if spec.alpha_matte is not None:
+            core_alpha *= resize_refined_envelope(spec.mask, size)
+        else:
+            core_alpha *= resize_semantic_support(spec.mask, size)
+    return np.ceil(
+        np.maximum(0.0, np.clip(core_alpha, 0.0, 1.0) * 255.0 - 1e-7)
+    ).astype(np.uint8)
+
+
+def _ceil_divide(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    """Return mathematical ceil(numerator / denominator) for integer arrays."""
+
+    return -np.floor_divide(-numerator, denominator)
+
+
+def _minimum_pillow_alpha_u8(
+    target_u8: np.ndarray,
+    below_u8: np.ndarray,
+) -> np.ndarray:
+    """Return the least uint8 alpha able to reproduce every RGB channel.
+
+    Pillow composites one source channel ``F`` over an opaque lower channel
+    ``B`` as ``floor((A*F + (255-A)*B + 127) / 255)``.  Solving that integer
+    inequality at both legal foreground endpoints gives the exact minimum
+    serialized alpha, including Pillow's half-level rounding tolerance.
+    """
+
+    target = np.asarray(target_u8, dtype=np.int32)
+    below = np.asarray(below_u8, dtype=np.int32)
+    if target.shape != below.shape or target.ndim < 1 or target.shape[-1] != 3:
+        raise ValueError("target_u8 and below_u8 must be same-shape RGB arrays.")
+    lower_target = 255 * target - 127
+    upper_target = 255 * target + 127
+
+    brighter_denominator = np.maximum(255 - below, 1)
+    brighter = _ceil_divide(
+        lower_target - 255 * below,
+        brighter_denominator,
+    )
+    darker_denominator = np.maximum(below, 1)
+    darker = _ceil_divide(
+        255 * below - upper_target,
+        darker_denominator,
+    )
+    required = np.where(
+        target > below,
+        brighter,
+        np.where(target < below, darker, 0),
+    )
+    return np.clip(required.max(axis=-1), 0, 255).astype(np.uint8)
+
+
+def _pillow_foreground_bounds(
+    target_u8: np.ndarray,
+    below_u8: np.ndarray,
+    alpha_u8: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return exact legal foreground bounds and per-channel feasibility."""
+
+    target = np.asarray(target_u8, dtype=np.int32)
+    below = np.asarray(below_u8, dtype=np.int32)
+    alpha = np.asarray(alpha_u8, dtype=np.int32)
+    if target.shape != below.shape or target.ndim < 1 or target.shape[-1] != 3:
+        raise ValueError("target_u8 and below_u8 must be same-shape RGB arrays.")
+    if alpha.shape != target.shape[:-1]:
+        raise ValueError("alpha_u8 must match the RGB arrays without their channel axis.")
+
+    alpha_channel = alpha[..., None]
+    inverse_alpha = 255 - alpha_channel
+    safe_alpha = np.maximum(alpha_channel, 1)
+    lower_target = 255 * target - 127
+    upper_target = 255 * target + 127
+    lower_raw = _ceil_divide(
+        lower_target - inverse_alpha * below,
+        safe_alpha,
+    )
+    upper_raw = np.floor_divide(
+        upper_target - inverse_alpha * below,
+        safe_alpha,
+    )
+    lower = np.clip(lower_raw, 0, 255)
+    upper = np.clip(upper_raw, 0, 255)
+    feasible = np.logical_and.reduce(
+        (lower_raw <= 255, upper_raw >= 0, lower <= upper)
+    )
+
+    # At alpha zero the foreground is ignored.  Preserve deterministic bounds
+    # while recording that only an already-equal lower channel is feasible.
+    transparent = alpha_channel == 0
+    feasible = np.where(transparent, target == below, feasible)
+    lower = np.where(transparent, target, lower)
+    upper = np.where(transparent, target, upper)
+    return lower, upper, feasible
+
+
+def _solve_pillow_foreground_u8(
+    target_u8: np.ndarray,
+    below_u8: np.ndarray,
+    alpha_u8: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Choose an exact uint8 foreground and return per-pixel feasibility."""
+
+    target = np.asarray(target_u8, dtype=np.int32)
+    below = np.asarray(below_u8, dtype=np.int32)
+    alpha = np.asarray(alpha_u8, dtype=np.int32)
+    lower, upper, feasible_channels = _pillow_foreground_bounds(
+        target, below, alpha
+    )
+    alpha_channel = alpha[..., None]
+    inverse_alpha = 255 - alpha_channel
+    safe_alpha = np.maximum(alpha_channel, 1)
+    # Select the nearest integer to the analytic foreground, then constrain it
+    # to the exact interval.  For infeasible pixels this is still the closest
+    # bounded approximation, preserving the renderer's diagnostic behavior.
+    analytic = (
+        255 * target - inverse_alpha * below
+    ).astype(np.float64) / safe_alpha
+    candidate = np.clip(np.floor(analytic + 0.5), 0, 255).astype(np.int32)
+    exact = np.minimum(np.maximum(candidate, lower), upper)
+    foreground = np.where(feasible_channels, exact, candidate)
+    foreground = np.where(alpha_channel == 0, target, foreground).astype(np.uint8)
+
+    composed = np.floor_divide(
+        alpha_channel * foreground.astype(np.int32)
+        + inverse_alpha * below
+        + 127,
+        255,
+    )
+    if not np.array_equal(composed[feasible_channels], target[feasible_channels]):
+        raise RuntimeError("Exact Pillow foreground solver failed its integer invariant.")
+    return foreground, feasible_channels.all(axis=-1)
+
+
+def project_clean_plate_for_alpha(
+    master_rgb: np.ndarray,
+    clean_candidate_rgb: np.ndarray,
+    alpha_u8: np.ndarray,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Project a clean plate to the nearest alpha-feasible 8-bit colour.
+
+    Pillow's opaque-destination composition is exactly
+    ``Q=floor((A*F + (255-A)*B + 127) / 255)``.  For output target ``T``, the
+    legal numerator interval is therefore ``255*T-127`` through ``255*T+127``.
+    This function clips each clean-candidate channel to the nearest lower colour
+    for which at least one integer foreground exists at the fixed serialized
+    alpha.  At alpha 0 the only feasible lower colour is T; at alpha 255 the
+    clean candidate is unconstrained.
+    """
+
+    target = np.asarray(master_rgb)
+    clean = np.asarray(clean_candidate_rgb)
+    alpha = np.asarray(alpha_u8)
+    if (
+        target.dtype != np.uint8
+        or clean.dtype != np.uint8
+        or target.ndim != 3
+        or clean.ndim != 3
+        or target.shape != clean.shape
+        or target.shape[2] != 3
+    ):
+        raise ValueError(
+            "master_rgb and clean_candidate_rgb must be same-shape uint8 RGB arrays."
+        )
+    if alpha.dtype != np.uint8 or alpha.ndim != 2 or alpha.shape != target.shape[:2]:
+        raise ValueError("alpha_u8 must be a same-canvas two-dimensional uint8 array.")
+
+    target_i = target.astype(np.int32)
+    clean_i = clean.astype(np.int32)
+    alpha_i = alpha.astype(np.int32)[..., None]
+    inverse_alpha = 255 - alpha_i
+    safe_inverse_alpha = np.maximum(inverse_alpha, 1)
+    lower_target = 255 * target_i - 127
+    upper_target = 255 * target_i + 127
+    lower = _ceil_divide(
+        lower_target - 255 * alpha_i,
+        safe_inverse_alpha,
+    )
+    upper = np.floor_divide(upper_target, safe_inverse_alpha)
+    lower = np.clip(lower, 0, 255)
+    upper = np.clip(upper, 0, 255)
+    opaque = alpha_i == 255
+    lower = np.where(opaque, 0, lower)
+    upper = np.where(opaque, 255, upper)
+    if np.any(lower > upper):  # pragma: no cover - T itself is always feasible
+        raise RuntimeError("Computed alpha-feasible colour interval is empty.")
+    projected_i = np.minimum(np.maximum(clean_i, lower), upper)
+    projected = projected_i.astype(np.uint8)
+
+    foreground, feasible_pixels = _solve_pillow_foreground_u8(
+        target, projected, alpha
+    )
+    composed = np.floor_divide(
+        alpha_i * foreground.astype(np.int32)
+        + inverse_alpha * projected_i
+        + 127,
+        255,
+    )
+    exact_error = np.abs(composed - target_i)
+    if not feasible_pixels.all() or exact_error.max() != 0:
+        raise RuntimeError("Projected clean plate is not exactly alpha-feasible.")
+
+    changed_channels = projected_i != clean_i
+    changed_pixels = np.any(changed_channels, axis=2)
+    target_f = target.astype(np.float64) / 255.0
+    projected_f = projected.astype(np.float64) / 255.0
+    alpha_f = alpha.astype(np.float64) / 255.0
+    delta = target_f - projected_f
+    required_up = np.where(
+        delta > 0,
+        delta / np.maximum(1.0 - projected_f, 1.0 / 255.0),
+        0.0,
+    )
+    required_down = np.where(
+        delta < 0,
+        -delta / np.maximum(projected_f, 1.0 / 255.0),
+        0.0,
+    )
+    required = np.maximum(required_up, required_down).max(axis=2)
+    excess = np.maximum(required - alpha_f, 0.0)
+    return projected, {
+        "policy": "nearest per-channel clean colour inside exact canonical-alpha feasibility interval",
+        "serialized_alpha_safety_margin_levels": 0,
+        "changed_pixel_count": int(changed_pixels.sum()),
+        "changed_channel_count": int(changed_channels.sum()),
+        "unchanged_pixel_count": int((~changed_pixels).sum()),
+        "alpha_zero_pixel_count": int((alpha == 0).sum()),
+        "alpha_opaque_pixel_count": int((alpha == 255).sum()),
+        "mean_abs_projection_distance": round(
+            float(np.abs(projected_i - clean_i).mean()), 6
+        ),
+        "max_abs_projection_distance": int(
+            np.abs(projected_i - clean_i).max()
+        ),
+        "maximum_continuous_required_alpha_excess": round(float(excess.max()), 12),
+        "maximum_exact_required_alpha_excess_levels": int(
+            np.maximum(
+                _minimum_pillow_alpha_u8(target, projected).astype(np.int16)
+                - alpha.astype(np.int16),
+                0,
+            ).max()
+        ),
+        "exact_pillow_recomposition_max_abs_error": int(exact_error.max()),
+        "feasibility_gate_passed": True,
+    }
+
+
 def _category_order(category: str) -> int:
     return {"detail_group": 0, "object": 1, "text_raster": 2}.get(category, 0)
 
 
-def render_layers(
-    master_rgb: np.ndarray,
-    background_rgb: np.ndarray,
-    specs: list[LayerSpec],
-    *,
-    layer_targets: dict[str, np.ndarray] | None = None,
-    support_masks: dict[str, np.ndarray] | None = None,
-) -> tuple[list[RenderedLayer], Image.Image, dict[str, object]]:
-    """Render bottom-to-top RGBA layers and solve edge colours against what is below."""
+def ordered_layer_specs(specs: list[LayerSpec]) -> list[LayerSpec]:
+    """Return the canonical container-compatible bottom-to-top render order."""
 
-    height, width = master_rgb.shape[:2]
     base_order = sorted(
         specs,
         key=lambda spec: (
@@ -150,35 +464,76 @@ def render_layers(
         active.remove(spec.layer_id)
         emitted.add(spec.layer_id)
 
-    # A container cannot retain hierarchy and also keep children elsewhere in
-    # the global z-order. Render parent and descendants contiguously so the PNG
-    # preview, PSD groups, and ORA stacks share one bottom-to-top order.
     for root_spec in root_specs:
         emit(root_spec)
     if len(ordered_specs) != len(base_order):
         raise RuntimeError("V5 hierarchy did not produce a complete render order.")
+    return ordered_specs
+
+
+def render_layers(
+    master_rgb: np.ndarray,
+    background_rgb: np.ndarray,
+    specs: list[LayerSpec],
+    *,
+    layer_targets: dict[str, np.ndarray] | None = None,
+    support_masks: dict[str, np.ndarray] | None = None,
+    matte_policy: str = "clean",
+) -> tuple[list[RenderedLayer], Image.Image, dict[str, object]]:
+    """Render RGBA layers using either clean ownership or legacy faithful effects.
+
+    ``clean`` is the editable-delivery policy: alpha is forbidden outside the
+    semantic mask.  ``faithful`` retains V5's former restoration/effect support
+    and exists only for backwards-compatible diagnostics.
+    """
+
+    if matte_policy not in {"clean", "faithful"}:
+        raise ValueError("matte_policy must be 'clean' or 'faithful'.")
+
+    height, width = master_rgb.shape[:2]
+    # A container cannot retain hierarchy and also keep children elsewhere in
+    # the global z-order. Render parent and descendants contiguously so the PNG
+    # preview, PSD groups, and ORA stacks share one bottom-to-top order.
+    ordered_specs = ordered_layer_specs(specs)
     # Keep the working composite in the same 8-bit representation that the
     # exported PNG/PSD/ORA layers use. A float-only ideal can report zero error
     # while the actual saved layers differ visibly after alpha quantization.
     current_u8 = np.array(background_rgb, dtype=np.uint8, copy=True)
-    target = master_rgb.astype(np.float32) / 255.0
     rendered: list[RenderedLayer] = []
     for spec in ordered_specs:
-        core_alpha = resize_alpha(spec.mask, (width, height))
-        effect_radius = max(2, min(72, int(round(min(width, height) / 150))))
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (effect_radius * 2 + 1, effect_radius * 2 + 1)
+        refined_alpha = spec.alpha_matte is not None
+        base_alpha_canvas_u8 = serialized_base_alpha_u8(
+            spec,
+            (width, height),
+            matte_policy=matte_policy,
         )
-        support = cv2.dilate((core_alpha > 0.002).astype(np.uint8), kernel).astype(bool)
-        source_support = (support_masks or {}).get(spec.layer_id)
-        if source_support is not None:
-            source_support_array = np.asarray(source_support, dtype=bool)
-            if source_support_array.ndim != 2:
-                raise ValueError(f"Support mask for {spec.layer_id} must be two-dimensional.")
-            support_image = Image.fromarray(source_support_array.astype(np.uint8) * 255, "L")
-            if support_image.size != (width, height):
-                support_image = support_image.resize((width, height), Image.Resampling.NEAREST)
-            support |= np.asarray(support_image, dtype=np.uint8) > 0
+        core_alpha = base_alpha_canvas_u8.astype(np.float32) / 255.0
+        semantic_support = resize_semantic_support(spec.mask, (width, height))
+        if matte_policy == "clean":
+            if refined_alpha:
+                # Preserve the continuous ViTMatte/Lanczos edge instead of
+                # clipping it into nearest-neighbour xN blocks.  The model was
+                # already hard-clipped to the clean source topology; a one-px
+                # envelope is the only legal resampling runway.
+                support = base_alpha_canvas_u8 > 0
+            else:
+                # Binary object/panel ownership remains exact and conservative.
+                support = semantic_support
+        else:
+            effect_radius = max(2, min(72, int(round(min(width, height) / 150))))
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (effect_radius * 2 + 1, effect_radius * 2 + 1)
+            )
+            support = cv2.dilate((core_alpha > 0.002).astype(np.uint8), kernel).astype(bool)
+            source_support = (support_masks or {}).get(spec.layer_id)
+            if source_support is not None:
+                source_support_array = np.asarray(source_support, dtype=bool)
+                if source_support_array.ndim != 2:
+                    raise ValueError(f"Support mask for {spec.layer_id} must be two-dimensional.")
+                support_image = Image.fromarray(source_support_array.astype(np.uint8) * 255, "L")
+                if support_image.size != (width, height):
+                    support_image = support_image.resize((width, height), Image.Resampling.NEAREST)
+                support |= np.asarray(support_image, dtype=np.uint8) > 0
         ys, xs = np.where(support)
         if not len(xs):
             continue
@@ -188,38 +543,36 @@ def render_layers(
             int(xs.max()) + 1,
             int(ys.max()) + 1,
         )
-        base_alpha = core_alpha[top:bottom, left:right]
+        base_alpha_u8 = base_alpha_canvas_u8[top:bottom, left:right]
         crop_support = support[top:bottom, left:right]
+        # Lanczos needs the narrow refined envelope for fractional coverage,
+        # but exact-colour correction must not turn its positive ringing lobes
+        # into new opaque islands.  Only nearest-resized semantic ownership may
+        # receive required_alpha promotion; the envelope keeps base_alpha only.
+        promotion_support = (
+            semantic_support[top:bottom, left:right]
+            if matte_policy == "clean" and refined_alpha
+            else crop_support
+        )
         below_u8 = current_u8[top:bottom, left:right]
-        below = below_u8.astype(np.float32) / 255.0
         desired_canvas = (layer_targets or {}).get(spec.layer_id, master_rgb)
-        desired = desired_canvas[top:bottom, left:right].astype(np.float32) / 255.0
-        delta = desired - below
-        required_up = np.where(
-            delta > 0,
-            delta / np.maximum(1.0 - below, 1.0 / 255.0),
-            0.0,
+        desired_u8 = np.asarray(
+            desired_canvas[top:bottom, left:right], dtype=np.uint8
         )
-        required_down = np.where(
-            delta < 0,
-            -delta / np.maximum(below, 1.0 / 255.0),
-            0.0,
-        )
-        required_alpha = np.clip(
-            np.maximum(required_up, required_down).max(axis=2), 0.0, 1.0
-        )
-        required_alpha[np.max(np.abs(delta), axis=2) < 0.5 / 255.0] = 0.0
-        ideal_alpha = np.maximum(base_alpha, required_alpha * crop_support)
-        # Ceil conservatively so quantization never drops below the minimum
-        # alpha required to represent the requested delta.
-        alpha_u8 = np.ceil(
-            np.maximum(0.0, np.clip(ideal_alpha, 0.0, 1.0) * 255.0 - 1e-7)
+        # The shared serialization helper above is also used by the reverse
+        # stack planner. Continuous-alpha bounds are unnecessarily strict near
+        # an 8-bit rounding boundary and used to promote a canonical A=1 edge
+        # to A=2 even though A=1 could reproduce the output exactly.
+        required_alpha_u8 = _minimum_pillow_alpha_u8(desired_u8, below_u8)
+        # Required alpha is useful for colour decontamination at the contour,
+        # but in clean mode it is allowed only *inside* semantic ownership.
+        promotable_required = np.where(
+            promotion_support, required_alpha_u8, 0
         ).astype(np.uint8)
-        crop_alpha = alpha_u8.astype(np.float32) / 255.0
-        divisor = np.maximum(crop_alpha[..., None], 1.0 / 255.0)
-        foreground = (desired - (1.0 - crop_alpha[..., None]) * below) / divisor
-        foreground = np.clip(foreground, 0.0, 1.0)
-        foreground_u8 = np.clip(foreground * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        alpha_u8 = np.maximum(base_alpha_u8, promotable_required)
+        foreground_u8, _feasible_pixels = _solve_pillow_foreground_u8(
+            desired_u8, below_u8, alpha_u8
+        )
         rgba = np.dstack(
             (
                 foreground_u8,
@@ -258,18 +611,813 @@ def render_layers(
     psnr = float("inf") if mse == 0 else 10.0 * math.log10(255.0**2 / mse)
     report = {
         "rendered_layer_count": len(rendered),
+        "matte_policy": matte_policy,
         "recomposition_max_abs_error": int(error.max()),
         "recomposition_mean_abs_error": round(float(error.mean()), 6),
         "recomposition_psnr_db": "infinite" if math.isinf(psnr) else round(psnr, 4),
         "edge_policy": (
-            "semantic core alpha plus the exact source-space restoration footprint and conservative "
-            "ceil-to-8-bit effect/shadow alpha; "
-            "foreground colours solved against and recomposited into the actual 8-bit lower composite"
+            "binary mattes stay inside nearest-resized semantic ownership; topology-cleaned "
+            "fractional text mattes use Lanczos base alpha inside a one-source-pixel envelope, "
+            "while required-alpha promotion is restricted to nearest semantic ownership; edge "
+            "colours and the minimum necessary alpha are solved with Pillow's exact integer "
+            "source-over equation against the actual 8-bit lower composite"
+            if matte_policy == "clean"
+            else "legacy semantic core plus restoration/effect support and conservative ceil-to-8-bit "
+            "model alpha; required alpha and foreground colours use Pillow's exact integer "
+            "source-over equation against the actual 8-bit lower composite"
         ),
         "preview_basis": "actual cropped 8-bit RGBA assets composited bottom-to-top with Pillow",
         "layer_order_policy": "container-compatible depth-first bottom-to-top (parent, then descendants)",
     }
     return rendered, composite, report
+
+
+def rendered_alpha_canvases(
+    rendered: list[RenderedLayer],
+    canvas_size: tuple[int, int],
+    *,
+    refined_only: bool = False,
+) -> dict[str, np.ndarray]:
+    """Expand cropped serialized alpha into stable full-canvas uint8 references."""
+
+    width, height = canvas_size
+    if width <= 0 or height <= 0:
+        raise ValueError("canvas_size must contain positive dimensions.")
+    result: dict[str, np.ndarray] = {}
+    for item in rendered:
+        if refined_only and item.spec.alpha_matte is None:
+            continue
+        layer_id = item.spec.layer_id
+        if layer_id in result:
+            raise ValueError(f"Duplicate rendered layer id: {layer_id}")
+        left, top, right, bottom = item.bbox
+        if not (0 <= left <= right <= width and 0 <= top <= bottom <= height):
+            raise ValueError(f"Rendered alpha escapes canvas: {layer_id}")
+        alpha = np.asarray(item.alpha, dtype=np.uint8)
+        if alpha.shape != (bottom - top, right - left):
+            raise ValueError(f"Rendered alpha shape mismatch: {layer_id}")
+        canvas = np.zeros((height, width), dtype=np.uint8)
+        canvas[top:bottom, left:right] = alpha
+        result[layer_id] = canvas
+    return result
+
+
+def find_required_alpha_promoted_singletons(
+    rendered: list[RenderedLayer],
+    canvas_size: tuple[int, int],
+    source_rgb: np.ndarray,
+    *,
+    high_alpha_threshold: int = 128,
+    low_source_alpha_threshold: float = 0.5,
+    minimum_glyph_height: int = 20,
+    background_source_alpha_threshold: float = 0.25,
+    local_radius: int = 5,
+    local_background_lab_limit: float = 34.0,
+    minimum_background_neighbours: int = 4,
+    maximum_per_layer: int = 2,
+) -> list[dict[str, object]]:
+    """Find isolated text pixels promoted by the exact-composition solver.
+
+    The clean renderer may raise a very small, non-zero source matte value to
+    opaque alpha when the lower/parent layer has already been cleaned beneath
+    that pixel.  That is necessary for exact recomposition, but a lone promoted
+    pixel is not a useful editable edge.  Detection deliberately runs at source
+    resolution so rendered coordinates map one-to-one back to ``mask`` and
+    ``alpha_matte``.
+
+    Real detached punctuation and accents are protected in two independent
+    ways: only one-pixel output components whose *source* matte is below 0.5 are
+    considered, and the source colour must have a locally connected-looking
+    background cluster while not matching a reliable glyph-body palette.  The
+    restriction to OCR/visual text rows and reasonably tall glyph groups also
+    prevents this topology policy from changing small icons or object layers.
+    """
+
+    width, height = canvas_size
+    if width <= 0 or height <= 0:
+        raise ValueError("canvas_size must contain positive dimensions.")
+    if not 1 <= high_alpha_threshold <= 255:
+        raise ValueError("high_alpha_threshold must be from 1 through 255.")
+    if not 0.0 < low_source_alpha_threshold <= 1.0:
+        raise ValueError("low_source_alpha_threshold must be in (0, 1].")
+    if minimum_glyph_height < 1:
+        raise ValueError("minimum_glyph_height must be positive.")
+    rgb = np.asarray(source_rgb)
+    if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape != (height, width, 3):
+        raise ValueError(
+            "source_rgb must be a source-resolution uint8 RGB array matching canvas_size."
+        )
+    if not 0.0 < background_source_alpha_threshold < low_source_alpha_threshold:
+        raise ValueError(
+            "background_source_alpha_threshold must be positive and below "
+            "low_source_alpha_threshold."
+        )
+    if local_radius < 2:
+        raise ValueError("local_radius must be at least 2 pixels.")
+    if local_background_lab_limit <= 0:
+        raise ValueError("local_background_lab_limit must be positive.")
+    if minimum_background_neighbours < 2:
+        raise ValueError("minimum_background_neighbours must be at least 2.")
+    if maximum_per_layer < 1:
+        raise ValueError("maximum_per_layer must be positive.")
+
+    source_lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    candidates: dict[str, list[dict[str, object]]] = defaultdict(list)
+    pure_text_roles = {"ocr_text_line", "visual_text_row"}
+    for item in rendered:
+        spec = item.spec
+        source_alpha = spec.alpha_matte
+        if source_alpha is None:
+            continue
+        if spec.category != "text_raster":
+            continue
+        if str(spec.metadata.get("grouping_role", "")) not in pure_text_roles:
+            continue
+        if spec.bbox[3] - spec.bbox[1] < minimum_glyph_height:
+            continue
+        if spec.mask.shape != (height, width) or source_alpha.shape != (height, width):
+            raise ValueError(
+                "Promoted-singleton preflight must run at source resolution; "
+                f"layer {spec.layer_id!r} is {spec.mask.shape}, canvas is {(height, width)}."
+            )
+
+        # Only substantial >=.75 components define protected text colour.
+        # Tiny components cannot vote themselves into the palette, and broad
+        # panel-coloured false support is rejected later relative to each
+        # candidate's local background estimate.
+        glyph_height = spec.bbox[3] - spec.bbox[1]
+        strong = np.asarray(source_alpha >= 0.75, dtype=np.uint8)
+        strong_count, strong_labels, strong_stats, _ = cv2.connectedComponentsWithStats(
+            strong, 8
+        )
+        minimum_body_area = max(8, int(round(0.018 * glyph_height * glyph_height)))
+        body_palettes: list[np.ndarray] = []
+        for body_id in range(1, strong_count):
+            if int(strong_stats[body_id, cv2.CC_STAT_AREA]) < minimum_body_area:
+                continue
+            body_palettes.append(np.median(source_lab[strong_labels == body_id], axis=0))
+
+        alpha = np.asarray(item.alpha, dtype=np.uint8)
+        high = (alpha >= high_alpha_threshold).astype(np.uint8)
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            high, 8
+        )
+        for component_id in range(1, component_count):
+            if int(stats[component_id, cv2.CC_STAT_AREA]) != 1:
+                continue
+            local_y, local_x = np.argwhere(labels == component_id)[0]
+            global_x = int(item.left + int(local_x))
+            global_y = int(item.top + int(local_y))
+            if not (0 <= global_x < width and 0 <= global_y < height):
+                raise RuntimeError(
+                    f"Rendered alpha for {spec.layer_id!r} escaped the source canvas."
+                )
+            base_alpha = float(source_alpha[global_y, global_x])
+            # Zero cannot be owned by a source-resolution clean support.  Keep
+            # this guard so stale or malformed render records are never used to
+            # delete unrelated semantic pixels.
+            if not 0.0 < base_alpha < low_source_alpha_threshold:
+                continue
+
+            y0 = max(0, global_y - local_radius)
+            y1 = min(height, global_y + local_radius + 1)
+            x0 = max(0, global_x - local_radius)
+            x1 = min(width, global_x + local_radius + 1)
+            local_mask = spec.mask[y0:y1, x0:x1]
+            local_source_alpha = source_alpha[y0:y1, x0:x1]
+            background_evidence = (~local_mask) | (
+                local_source_alpha < background_source_alpha_threshold
+            )
+            background_evidence = np.array(background_evidence, dtype=bool, copy=True)
+            background_evidence[global_y - y0, global_x - x0] = False
+            evidence_lab = source_lab[y0:y1, x0:x1][background_evidence]
+            if len(evidence_lab) < minimum_background_neighbours:
+                continue
+            candidate_lab = source_lab[global_y, global_x]
+            evidence_distance = np.linalg.norm(evidence_lab - candidate_lab, axis=1)
+            close = evidence_distance <= local_background_lab_limit
+            close_count = int(close.sum())
+            if close_count < minimum_background_neighbours:
+                continue
+            # A mixed edge may contain several colours.  Use only the closest
+            # locally supported cluster rather than letting an adjacent yellow
+            # glyph or white outline move the background median.
+            close_lab = evidence_lab[close]
+            if len(close_lab) > 16:
+                nearest = np.argsort(evidence_distance[close])[:16]
+                close_lab = close_lab[nearest]
+            local_background_lab = np.median(close_lab, axis=0)
+            background_distance = float(
+                np.linalg.norm(candidate_lab - local_background_lab)
+            )
+            if background_distance > local_background_lab_limit:
+                continue
+
+            protected_palette_distance: float | None = None
+            if body_palettes:
+                body_distance = np.array(
+                    [
+                        float(np.linalg.norm(candidate_lab - palette))
+                        for palette in body_palettes
+                    ],
+                    dtype=np.float32,
+                )
+                body_background_contrast = np.array(
+                    [
+                        float(np.linalg.norm(local_background_lab - palette))
+                        for palette in body_palettes
+                    ],
+                    dtype=np.float32,
+                )
+                protected_body = body_background_contrast >= 24.0
+                if protected_body.any():
+                    protected_palette_distance = float(body_distance[protected_body].min())
+                    # A low model alpha is not deletion evidence if its source
+                    # colour is substantially closer to a trustworthy glyph
+                    # palette than to the local background (real punctuation,
+                    # diacritics and one-pixel tips fall into this case).
+                    if (
+                        protected_palette_distance <= 28.0
+                        and protected_palette_distance + 6.0 < background_distance
+                    ):
+                        continue
+
+            candidates[spec.layer_id].append(
+                {
+                    "layer_id": spec.layer_id,
+                    "x": global_x,
+                    "y": global_y,
+                    "source_alpha": round(base_alpha, 8),
+                    "rendered_alpha": int(alpha[local_y, local_x]),
+                    "component_area": 1,
+                    "local_background_neighbour_count": close_count,
+                    "local_background_distance_lab": round(background_distance, 4),
+                    "protected_body_palette_distance_lab": (
+                        None
+                        if protected_palette_distance is None
+                        else round(protected_palette_distance, 4)
+                    ),
+                    "reason": "required_alpha_promoted_low_source_singleton",
+                }
+            )
+
+    records: list[dict[str, object]] = []
+    for layer_id in sorted(candidates):
+        ranked = sorted(
+            candidates[layer_id],
+            key=lambda record: (
+                float(record["local_background_distance_lab"]),
+                -int(record["local_background_neighbour_count"]),
+                int(record["y"]),
+                int(record["x"]),
+            ),
+        )
+        records.extend(ranked[:maximum_per_layer])
+    records.sort(
+        key=lambda record: (str(record["layer_id"]), int(record["y"]), int(record["x"]))
+    )
+    return records
+
+
+def prune_required_alpha_promoted_singletons(
+    specs: list[LayerSpec],
+    records: list[dict[str, object]],
+    *,
+    low_source_alpha_threshold: float = 0.5,
+) -> tuple[list[LayerSpec], dict[str, object]]:
+    """Remove verified renderer-promoted singleton support without mutation.
+
+    Callers must rebuild all lower/background targets after this operation.
+    That reassigns the source pixel to the parent instead of merely punching a
+    hole in the final foreground alpha, preserving exact recomposition.
+    """
+
+    if not 0.0 < low_source_alpha_threshold <= 1.0:
+        raise ValueError("low_source_alpha_threshold must be in (0, 1].")
+    requested: dict[str, set[tuple[int, int]]] = defaultdict(set)
+    for record in records:
+        try:
+            layer_id = str(record["layer_id"])
+            x = int(record["x"])
+            y = int(record["y"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Malformed promoted-singleton record.") from exc
+        requested[layer_id].add((x, y))
+
+    known_ids = {spec.layer_id for spec in specs}
+    unknown_ids = sorted(set(requested) - known_ids)
+    if unknown_ids:
+        raise ValueError(f"Promoted-singleton records reference unknown layers: {unknown_ids}")
+
+    applied: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    updated: list[LayerSpec] = []
+    for spec in specs:
+        coordinates = sorted(requested.get(spec.layer_id, set()), key=lambda point: (point[1], point[0]))
+        if not coordinates:
+            updated.append(spec)
+            continue
+        if spec.alpha_matte is None:
+            raise ValueError(
+                f"Promoted-singleton record targets layer {spec.layer_id!r} without alpha_matte."
+            )
+        mask = np.array(spec.mask, dtype=bool, copy=True)
+        alpha_matte = np.array(spec.alpha_matte, dtype=np.float32, copy=True)
+        if alpha_matte.shape != mask.shape:
+            raise ValueError(f"Layer {spec.layer_id!r} has inconsistent mask/matte shapes.")
+        height, width = mask.shape
+        for x, y in coordinates:
+            if not (0 <= x < width and 0 <= y < height):
+                raise ValueError(
+                    f"Promoted-singleton coordinate {(x, y)} is outside layer {spec.layer_id!r}."
+                )
+            base_alpha = float(alpha_matte[y, x])
+            if mask[y, x] and 0.0 < base_alpha < low_source_alpha_threshold:
+                mask[y, x] = False
+                alpha_matte[y, x] = 0.0
+                applied.append(
+                    {
+                        "layer_id": spec.layer_id,
+                        "x": x,
+                        "y": y,
+                        "source_alpha_before": round(base_alpha, 8),
+                    }
+                )
+            else:
+                skipped.append(
+                    {
+                        "layer_id": spec.layer_id,
+                        "x": x,
+                        "y": y,
+                        "source_alpha": round(base_alpha, 8),
+                        "mask_owned": bool(mask[y, x]),
+                        "reason": "stale_or_protected_source_support",
+                    }
+                )
+        updated.append(
+            LayerSpec(
+                layer_id=spec.layer_id,
+                name=spec.name,
+                category=spec.category,
+                mask=mask,
+                score=spec.score,
+                source_ids=list(spec.source_ids),
+                label=spec.label,
+                text=spec.text,
+                metadata=dict(spec.metadata),
+                alpha_matte=alpha_matte,
+            )
+        )
+
+    return updated, {
+        "requested_count": sum(len(points) for points in requested.values()),
+        "applied_count": len(applied),
+        "skipped_count": len(skipped),
+        "applied": applied,
+        "skipped": skipped,
+        "policy": (
+            "remove only source-resolution pure-text high-alpha area-1 components "
+            "that were promoted from a non-zero source matte below 0.5; rebuild lower targets"
+        ),
+    }
+
+
+def _binary_topology_metrics(
+    binary: np.ndarray,
+    *,
+    micro_component_area: int,
+) -> dict[str, int]:
+    """Measure foreground with 8-connectivity and enclosed background with 4.
+
+    Cropping to the occupied bounds plus an explicit zero border makes the
+    counter/hole result independent of the rendered layer crop while retaining
+    the complementary FG8/BG4 topology used for raster glyphs.
+    """
+
+    foreground = np.asarray(binary, dtype=bool)
+    if foreground.ndim != 2:
+        raise ValueError("binary topology input must be two-dimensional.")
+    if micro_component_area < 1:
+        raise ValueError("micro_component_area must be positive.")
+    ys, xs = np.where(foreground)
+    if not len(xs):
+        return {
+            "foreground_pixels": 0,
+            "foreground_component_count_fg8": 0,
+            "micro_component_count": 0,
+            "enclosed_background_count_bg4": 0,
+        }
+    cropped = foreground[
+        int(ys.min()) : int(ys.max()) + 1,
+        int(xs.min()) : int(xs.max()) + 1,
+    ]
+    cropped = np.pad(cropped, 1, mode="constant", constant_values=False)
+    count, _labels, stats, _ = cv2.connectedComponentsWithStats(
+        cropped.astype(np.uint8), connectivity=8
+    )
+    areas = [int(stats[index, cv2.CC_STAT_AREA]) for index in range(1, count)]
+
+    background = (~cropped).astype(np.uint8)
+    background_count, background_labels, _background_stats, _ = (
+        cv2.connectedComponentsWithStats(background, connectivity=4)
+    )
+    border_labels = set(int(value) for value in background_labels[0, :])
+    border_labels.update(int(value) for value in background_labels[-1, :])
+    border_labels.update(int(value) for value in background_labels[:, 0])
+    border_labels.update(int(value) for value in background_labels[:, -1])
+    enclosed_background = sum(
+        component_id not in border_labels
+        for component_id in range(1, background_count)
+    )
+    return {
+        "foreground_pixels": int(cropped.sum()),
+        "foreground_component_count_fg8": max(0, count - 1),
+        "micro_component_count": sum(area <= micro_component_area for area in areas),
+        "enclosed_background_count_bg4": int(enclosed_background),
+    }
+
+
+def _enclosed_background_labels(foreground: np.ndarray) -> tuple[np.ndarray, int]:
+    """Label BG4 holes while forcing one explicit exterior background frame."""
+
+    binary = np.asarray(foreground, dtype=bool)
+    padded = np.pad(binary, 1, mode="constant", constant_values=False)
+    background = (~padded).astype(np.uint8)
+    count, labels = cv2.connectedComponents(background, connectivity=4)
+    exterior = int(labels[0, 0])
+    holes = labels.astype(np.int32, copy=True)
+    holes[holes == exterior] = 0
+    # Input foreground is zero in ``background`` and therefore already label 0.
+    hole_ids = np.unique(holes)
+    hole_ids = hole_ids[hole_ids > 0]
+    if len(hole_ids):
+        lookup = np.zeros(int(hole_ids.max()) + 1, dtype=np.int32)
+        lookup[hole_ids] = np.arange(1, len(hole_ids) + 1, dtype=np.int32)
+        holes = lookup[holes]
+    return holes, int(len(hole_ids))
+
+
+def _label_overlap_maps(
+    left_labels: np.ndarray,
+    right_labels: np.ndarray,
+    left_count: int,
+    right_count: int,
+) -> tuple[list[set[int]], list[set[int]]]:
+    """Return spatial overlap relations without scanning once per component."""
+
+    if left_labels.shape != right_labels.shape:
+        raise ValueError("Label images must share a shape.")
+    left_to_right = [set() for _ in range(left_count + 1)]
+    right_to_left = [set() for _ in range(right_count + 1)]
+    overlap = (left_labels > 0) & (right_labels > 0)
+    if not overlap.any():
+        return left_to_right, right_to_left
+    multiplier = right_count + 1
+    encoded = (
+        left_labels[overlap].astype(np.int64) * multiplier
+        + right_labels[overlap].astype(np.int64)
+    )
+    for value in np.unique(encoded):
+        left_id = int(value // multiplier)
+        right_id = int(value % multiplier)
+        left_to_right[left_id].add(right_id)
+        right_to_left[right_id].add(left_id)
+    return left_to_right, right_to_left
+
+
+def _spatial_topology_correspondence(
+    expected: np.ndarray,
+    actual: np.ndarray,
+    *,
+    scale_x: float,
+    scale_y: float,
+) -> dict[str, object]:
+    """Compare thresholded mattes by spatial FG8/BG4 correspondence.
+
+    Counts alone can be unchanged when two glyphs merge while a new island is
+    born, or when an O counter is filled while a C/G aperture closes elsewhere.
+    This gate pairs every component and every enclosed background region by
+    overlap, so those cancelling failures cannot pass.
+    """
+
+    reference = np.asarray(expected, dtype=bool)
+    candidate = np.asarray(actual, dtype=bool)
+    if reference.ndim != 2 or candidate.ndim != 2 or reference.shape != candidate.shape:
+        raise ValueError("expected and actual topology masks must be same-shape 2-D arrays.")
+    if not np.isfinite(scale_x) or not np.isfinite(scale_y) or scale_x <= 0 or scale_y <= 0:
+        raise ValueError("scale_x and scale_y must be finite and positive.")
+
+    # The comparison is logically full-canvas, but topology outside the union
+    # is guaranteed exterior background. Crop once to the occupied union before
+    # connected-component labeling to avoid allocating several 5016² label
+    # images for every refined layer and threshold.
+    hole_core_radius = max(1, int(math.ceil(0.5 * min(scale_x, scale_y))))
+    occupied_y, occupied_x = np.where(reference | candidate)
+    if not len(occupied_x):
+        return {
+            "expected_foreground_component_count_fg8": 0,
+            "actual_foreground_component_count_fg8": 0,
+            "expected_enclosed_background_count_bg4": 0,
+            "actual_enclosed_background_count_bg4": 0,
+            "orphan_actual_component_pixels": 0,
+            "merge_excess": 0,
+            "split_excess": 0,
+            "hole_core_radius_final_px": hole_core_radius,
+            "missing_expected_pixels": 0,
+            "orphan_actual_components": 0,
+            "merged_actual_components": 0,
+            "split_expected_components": 0,
+            "missing_expected_holes": 0,
+            "new_actual_holes": 0,
+            "split_expected_holes": 0,
+            "merged_actual_holes": 0,
+            "expected_hole_core_intrusion_pixels": 0,
+            "passed": True,
+        }
+    x0, x1 = int(occupied_x.min()), int(occupied_x.max()) + 1
+    y0, y1 = int(occupied_y.min()), int(occupied_y.max()) + 1
+    reference = reference[y0:y1, x0:x1]
+    candidate = candidate[y0:y1, x0:x1]
+
+    expected_padded = np.pad(reference, 1, mode="constant", constant_values=False)
+    actual_padded = np.pad(candidate, 1, mode="constant", constant_values=False)
+    expected_count, expected_labels, expected_stats, _ = cv2.connectedComponentsWithStats(
+        expected_padded.astype(np.uint8), connectivity=8
+    )
+    actual_count, actual_labels, actual_stats, _ = cv2.connectedComponentsWithStats(
+        actual_padded.astype(np.uint8), connectivity=8
+    )
+    expected_components = max(0, expected_count - 1)
+    actual_components = max(0, actual_count - 1)
+    expected_to_actual, actual_to_expected = _label_overlap_maps(
+        expected_labels,
+        actual_labels,
+        expected_components,
+        actual_components,
+    )
+    orphan_actual_ids = [
+        component_id
+        for component_id in range(1, actual_count)
+        if not actual_to_expected[component_id]
+    ]
+    merged_actual_ids = [
+        component_id
+        for component_id in range(1, actual_count)
+        if len(actual_to_expected[component_id]) > 1
+    ]
+    split_expected_ids = [
+        component_id
+        for component_id in range(1, expected_count)
+        if len(expected_to_actual[component_id]) > 1
+    ]
+    missing_expected_pixels = int(np.logical_and(reference, ~candidate).sum())
+
+    expected_holes, expected_hole_count = _enclosed_background_labels(reference)
+    actual_holes, actual_hole_count = _enclosed_background_labels(candidate)
+    expected_hole_to_actual, actual_hole_to_expected = _label_overlap_maps(
+        expected_holes,
+        actual_holes,
+        expected_hole_count,
+        actual_hole_count,
+    )
+    missing_expected_hole_ids = [
+        hole_id
+        for hole_id in range(1, expected_hole_count + 1)
+        if not expected_hole_to_actual[hole_id]
+    ]
+    new_actual_hole_ids = [
+        hole_id
+        for hole_id in range(1, actual_hole_count + 1)
+        if not actual_hole_to_expected[hole_id]
+    ]
+    split_expected_hole_ids = [
+        hole_id
+        for hole_id in range(1, expected_hole_count + 1)
+        if len(expected_hole_to_actual[hole_id]) > 1
+    ]
+    merged_actual_hole_ids = [
+        hole_id
+        for hole_id in range(1, actual_hole_count + 1)
+        if len(actual_hole_to_expected[hole_id]) > 1
+    ]
+
+    hole_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (hole_core_radius * 2 + 1, hole_core_radius * 2 + 1),
+    )
+    expected_hole_core = cv2.erode(
+        (expected_holes > 0).astype(np.uint8), hole_kernel
+    ).astype(bool)
+    # ``expected_holes`` is padded by one pixel, as are the component labels.
+    actual_foreground_padded = actual_padded
+    hole_core_intrusion = int(
+        np.logical_and(expected_hole_core, actual_foreground_padded).sum()
+    )
+
+    failures = {
+        "missing_expected_pixels": missing_expected_pixels,
+        "orphan_actual_components": len(orphan_actual_ids),
+        "merged_actual_components": len(merged_actual_ids),
+        "split_expected_components": len(split_expected_ids),
+        "missing_expected_holes": len(missing_expected_hole_ids),
+        "new_actual_holes": len(new_actual_hole_ids),
+        "split_expected_holes": len(split_expected_hole_ids),
+        "merged_actual_holes": len(merged_actual_hole_ids),
+        "expected_hole_core_intrusion_pixels": hole_core_intrusion,
+    }
+    return {
+        "expected_foreground_component_count_fg8": expected_components,
+        "actual_foreground_component_count_fg8": actual_components,
+        "expected_enclosed_background_count_bg4": expected_hole_count,
+        "actual_enclosed_background_count_bg4": actual_hole_count,
+        "orphan_actual_component_pixels": int(
+            sum(int(actual_stats[index, cv2.CC_STAT_AREA]) for index in orphan_actual_ids)
+        ),
+        "merge_excess": int(
+            sum(len(actual_to_expected[index]) - 1 for index in merged_actual_ids)
+        ),
+        "split_excess": int(
+            sum(len(expected_to_actual[index]) - 1 for index in split_expected_ids)
+        ),
+        "hole_core_radius_final_px": hole_core_radius,
+        **failures,
+        "passed": not any(failures.values()),
+    }
+
+
+def matte_quality_report(
+    rendered: list[RenderedLayer],
+    canvas_size: tuple[int, int],
+    *,
+    topology_reference: dict[str, np.ndarray] | None = None,
+) -> dict[str, object]:
+    """Audit exported ownership and scaled topology before publication.
+
+    Runtime callers provide the stable source-resolution *rendered* alpha from
+    the exact x1 preflight.  That canonical reference already includes valid
+    required-alpha corrections, punctuation and counters. Scaling it with
+    Lanczos distinguishes real xN topology damage from legitimate x1 solving.
+    The raw-matte fallback exists for isolated library tests only.
+    """
+
+    width, height = canvas_size
+    records: list[dict[str, object]] = []
+    outside_total = 0
+    outside_exact_total = 0
+    topology_checked_layers = 0
+    topology_failed_layers = 0
+    topology_failed_checks = 0
+    for item in rendered:
+        semantic = resize_semantic_support(item.spec.mask, canvas_size)
+        refined_alpha = item.spec.alpha_matte is not None
+        allowed = (
+            resize_refined_envelope(item.spec.mask, canvas_size)
+            if refined_alpha
+            else semantic
+        )
+        left, top, right, bottom = item.bbox
+        if not (0 <= left <= right <= width and 0 <= top <= bottom <= height):
+            raise RuntimeError(f"Rendered matte escapes canvas: {item.spec.layer_id}")
+        alpha = np.asarray(item.alpha, dtype=np.uint8)
+        expected_shape = (bottom - top, right - left)
+        if alpha.shape != expected_shape:
+            raise RuntimeError(
+                f"Rendered alpha shape mismatch for {item.spec.layer_id}: "
+                f"{alpha.shape} != {expected_shape}"
+            )
+        owned = alpha > 0
+        high = alpha >= 128
+        semantic_crop = semantic[top:bottom, left:right]
+        allowed_crop = allowed[top:bottom, left:right]
+        outside = int(np.logical_and(owned, ~allowed_crop).sum())
+        outside_exact = int(np.logical_and(owned, ~semantic_crop).sum())
+        outside_total += outside
+        outside_exact_total += outside_exact
+        count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            high.astype(np.uint8), 8
+        )
+        areas = sorted(
+            (int(stats[index, cv2.CC_STAT_AREA]) for index in range(1, count)),
+            reverse=True,
+        )
+        high_area = int(high.sum())
+        detached_area = sum(areas[1:]) if areas else 0
+        layer_record: dict[str, object] = {
+            "layer_id": item.spec.layer_id,
+            "role": str(item.spec.metadata.get("grouping_role", "")),
+            "matte_source": "vitmatte_fractional" if refined_alpha else "binary_semantic",
+            "nonzero_alpha_pixels": int(owned.sum()),
+            "high_alpha_pixels": high_area,
+            "soft_alpha_pixels": int(np.logical_and(alpha > 0, alpha < 255).sum()),
+            "high_alpha_component_count": max(0, count - 1),
+            "detached_high_alpha_ratio": round(detached_area / max(1, high_area), 6),
+            "alpha_outside_semantic_pixels": outside,
+            "alpha_outside_exact_nearest_semantic_pixels": outside_exact,
+        }
+
+        if refined_alpha:
+            topology_checked_layers += 1
+            source_alpha = np.asarray(item.spec.alpha_matte, dtype=np.float32)
+            if source_alpha.shape != item.spec.mask.shape:
+                raise RuntimeError(
+                    f"Source alpha shape mismatch for topology QA: {item.spec.layer_id}"
+                )
+            if topology_reference is not None:
+                if item.spec.layer_id not in topology_reference:
+                    raise ValueError(
+                        "Missing canonical topology reference for refined layer: "
+                        f"{item.spec.layer_id}"
+                    )
+                canonical_u8 = np.asarray(
+                    topology_reference[item.spec.layer_id]
+                )
+                if canonical_u8.dtype != np.uint8 or canonical_u8.ndim != 2:
+                    raise ValueError(
+                        "Canonical topology references must be two-dimensional uint8 alpha."
+                    )
+                if canonical_u8.shape != item.spec.mask.shape:
+                    raise ValueError(
+                        f"Canonical topology reference shape {canonical_u8.shape} does not "
+                        f"match source mask {item.spec.mask.shape} for {item.spec.layer_id}."
+                    )
+                reference_image = Image.fromarray(canonical_u8, "L")
+                if reference_image.size != canvas_size:
+                    reference_image = reference_image.resize(
+                        canvas_size, Image.Resampling.LANCZOS
+                    )
+                expected_u8 = np.array(reference_image, dtype=np.uint8, copy=True)
+                expected_u8[~allowed] = 0
+                reference_policy = (
+                    "Lanczos resize of stable x1 preflight serialized alpha, clipped to legal envelope"
+                )
+            else:
+                reference_alpha = resize_alpha(
+                    item.spec.mask,
+                    canvas_size,
+                    alpha_matte=source_alpha,
+                )
+                reference_alpha *= allowed
+                expected_u8 = np.ceil(
+                    np.maximum(0.0, reference_alpha * 255.0 - 1e-7)
+                ).astype(np.uint8)
+                reference_policy = (
+                    "raw source matte fallback (tests only; production supplies canonical x1 alpha)"
+                )
+            actual_u8 = np.zeros((height, width), dtype=np.uint8)
+            actual_u8[top:bottom, left:right] = alpha
+            scale_x = width / max(1, item.spec.mask.shape[1])
+            scale_y = height / max(1, item.spec.mask.shape[0])
+            threshold_records: list[dict[str, object]] = []
+            layer_topology_passed = True
+            for threshold, actual_level in ((0.25, 64), (0.5, 128), (0.75, 192)):
+                correspondence = _spatial_topology_correspondence(
+                    expected_u8 >= actual_level,
+                    actual_u8 >= actual_level,
+                    scale_x=scale_x,
+                    scale_y=scale_y,
+                )
+                if not correspondence["passed"]:
+                    topology_failed_checks += 1
+                    layer_topology_passed = False
+                threshold_records.append(
+                    {
+                        "threshold": threshold,
+                        "integer_alpha_level": actual_level,
+                        **correspondence,
+                    }
+                )
+            if not layer_topology_passed:
+                topology_failed_layers += 1
+            layer_record["scaled_topology"] = {
+                "connectivity": "foreground 8 / enclosed background 4",
+                "reference": reference_policy,
+                "passed": layer_topology_passed,
+                "thresholds": threshold_records,
+            }
+        records.append(layer_record)
+    return {
+        "policy": (
+            "binary alpha must remain inside semantic ownership; fractional text alpha may use "
+            "only a one-source-pixel resampling envelope; every refined layer is spatially "
+            "release-gated against its Lanczos-resized stable x1 rendered alpha at exact "
+            "levels 64/128/192 using FG8/BG4 components, counters and protected hole cores"
+        ),
+        "layer_count": len(records),
+        "alpha_outside_semantic_pixels": outside_total,
+        "alpha_outside_exact_nearest_semantic_pixels": outside_exact_total,
+        "ownership_gate_passed": outside_total == 0,
+        "topology_checked_layer_count": topology_checked_layers,
+        "topology_failed_layer_count": topology_failed_layers,
+        "topology_failed_threshold_count": topology_failed_checks,
+        "topology_gate_passed": topology_failed_layers == 0,
+        "topology_reference_source": (
+            "stable_source_resolution_preflight_render"
+            if topology_reference is not None
+            else "raw_source_matte_fallback"
+        ),
+        "layers": records,
+    }
 
 
 def _slug_layer(index: int, rendered: RenderedLayer) -> str:

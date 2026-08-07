@@ -70,6 +70,45 @@ class NoTextStatusGuardrailTests(unittest.TestCase):
             "QA output must disclose why a no-text run is not print-ready.",
         )
 
+    def test_rejected_or_missing_default_sr_cannot_be_mislabeled_pass(self) -> None:
+        tree = _engine_tree()
+        guarded_review_branches = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            assigned_review = any(
+                isinstance(child, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "status"
+                    for target in child.targets
+                )
+                and isinstance(child.value, ast.Constant)
+                and child.value.value == "REVIEW_REQUIRED"
+                for child in node.body
+            )
+            names = {child.id for child in ast.walk(node.test) if isinstance(child, ast.Name)}
+            if assigned_review and "raster_restore_review_required" in names:
+                guarded_review_branches.append(node)
+
+        self.assertTrue(
+            guarded_review_branches,
+            "Default raster restoration without an accepted SR prediction must require review.",
+        )
+
+        audited = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values, strict=True):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "raster_restore_review_required"
+                    and isinstance(value, ast.Name)
+                    and value.id == "raster_restore_review_required"
+                ):
+                    audited = True
+        self.assertTrue(audited, "QA/manifest must disclose the raster fallback review gate.")
+
 
 if __name__ == "__main__":
     unittest.main()

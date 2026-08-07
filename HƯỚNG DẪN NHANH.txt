@@ -51,6 +51,10 @@ V5 — TÁCH LAYER ĐỂ CHỈNH SỬA
 
    Dùng n=1 khi muốn file layer nhẹ để sửa trước.
    Xuất PSD + ORA + ZIP layer/mask và các file xem trước.
+   Mask vật thể giữ đúng vùng semantic; viền nền, bóng và mảnh rời không được nới theo bán kính inpaint.
+   Chữ được khoét sạch lòng O/G/N, bảo vệ dấu tiếng Việt và làm mịn mép bằng ViTMatte cục bộ.
+   Trước khi xuất, V5 tự ghép thử ở x1 để chuyển hạt nền còn dính về layer cha mà không làm mất dấu thật.
+   Khi phóng xN, alpha x1 được khóa; V5 chỉ giải lại màu nền/tiền cảnh, không được bơm alpha làm bít lòng chữ.
    Nhận bộ file tại: OUTPUT\V5_LAYERS
 
    Nếu cần tài liệu layer lớn x4 ngay từ đầu:
@@ -58,7 +62,7 @@ V5 — TÁCH LAYER ĐỂ CHỈNH SỬA
    .\upscale layers test.png 4
 
 
-V7 — SỬA CHỮ GÃY, MỜ, THIẾU DẤU HOẶC SAI CHÍNH TẢ
+V7 — PHỤC DỰNG ẢNH MỜ + SỬA CHỮ GÃY/SAI
 
    Cài một lần trước khi dùng V7:
 
@@ -66,20 +70,41 @@ V7 — SỬA CHỮ GÃY, MỜ, THIẾU DẤU HOẶC SAI CHÍNH TẢ
 
    .\upscale repair test.png 1
 
-   Dùng n=1 để sửa ở kích thước gốc; không cần GPU.
-   Mặc định chương trình mở cửa sổ cho bạn duyệt chữ không chắc chắn.
-   Chỉ vùng chữ đã duyệt mới bị gỡ/vẽ lại; nền dưới chữ là phần tái tạo có giới hạn.
+   n=1 vẫn phục dựng raster toàn ảnh bằng GPU: tạo Swin2SR fidelity x4 rồi thu về x1.
+   Mặc định chương trình mở trang duyệt chữ cục bộ; Chrome được ưu tiên.
+   Chỉ vùng chữ đã duyệt mới bị gỡ/vẽ lại; đường phục dựng raster đánh giá toàn ảnh.
+   Từng pre-stage có thể bị bỏ qua/rollback và Swin2SR có thể fallback nếu không vượt QA;
+   fallback vẫn mang trạng thái cần duyệt, không giả là kết quả đã đạt.
+   V7 không dùng GAN/fusion ba model. AI dự đoán pixel hợp lý, không lấy lại được bằng chứng đã mất.
    Nhận bộ file tại: OUTPUT\V7_REPAIR
 
    Nếu muốn sửa chữ và làm lớn x4 trong cùng lượt:
 
    .\upscale repair test.png 4
 
-   V7 x2 đến x20 cần bộ V3 và GPU NVIDIA CUDA.
+   V7 mặc định cần bộ V3 và GPU NVIDIA CUDA cho cả x1 lẫn x2 đến x20.
    SVG V7 có chữ Unicode chỉnh sửa được, nhưng hình/nền vẫn là raster và font không được nhúng.
    V7 tự khớp khung nét cũ và có thể dùng OpenType Variable Font để giữ đúng tỷ lệ chữ, không kéo giãn bitmap.
    Font, độ đậm và độ rộng đã kiểm tra ở n=1 được khóa giữ nguyên tỷ lệ khi chạy n=4/n=10.
    V7 không xuất PDF/X-4; muốn giao in vẫn dùng V4 sau khi đã sửa và duyệt xong.
+
+   Trong mỗi bundle, người dùng chỉ cần nhìn:
+
+   01_KET_QUA_DA_DAT.png          kết quả đã PASS
+   hoặc 01_XEM_TRUOC_CAN_DUYET.png khi chưa PASS
+   02_SO_SANH.png                 so sánh trước/sau
+   03_CHINH_SUA.svg               chữ Unicode có thể chỉnh
+   _KY_THUAT                      JSON, ảnh QA và file nội bộ
+
+   Mở lại màn hình duyệt mà không cần đụng JSON:
+
+   .\upscale review "D:\DUONG_DAN\TEN_BUNDLE_V7"
+
+   Có thể gõ "duyet" thay cho "review".
+   Nếu chỉ cần làm rõ ảnh và muốn giữ nguyên toàn bộ chữ/số đang có, bấm
+   "Giữ nguyên tất cả vùng còn lại" rồi bấm "Lưu và hoàn tất" để đóng phiên duyệt.
+   Các quyết định được lưu ngay khi bấm; nút này không áp dụng đề xuất OCR, không thay
+   giá, số điện thoại hoặc mã hàng.
 
 
 4. NHỚ NHANH ĐỂ KHÔNG NHẦM:
@@ -88,7 +113,7 @@ V7 — SỬA CHỮ GÃY, MỜ, THIẾU DẤU HOẶC SAI CHÍNH TẢ
    V3 = PNG AI đẹp            -> .\upscale high
    V4 = giao nhà in           -> .\upscale print
    V5 = tách và chỉnh layer   -> .\upscale layers
-   V7 = sửa chữ và nền quanh chữ -> .\upscale repair
+   V7 = phục dựng toàn ảnh + sửa chữ -> .\upscale repair
 
 
 5. CHẠY TOÀN BỘ ẢNH TRONG MỘT THƯ MỤC:
@@ -101,16 +126,19 @@ Thay tên ảnh bằng đường dẫn thư mục. Tất cả ảnh dùng chung 
    V5: .\upscale layers "D:\BO ANH" 1
    V7: .\upscale repair "D:\BO ANH" 1 --review defer
 
-V7 chạy thư mục sẽ ghi TEXT_REVIEW.json riêng cho từng ảnh, không mở hàng loạt cửa sổ.
-Sau khi sửa/duyệt các JSON, chạy lại đúng lệnh thư mục; V7 tự nạp review đúng của từng ảnh:
+V7 chạy thư mục không mở hàng loạt cửa sổ. Mở từng bundle cần duyệt bằng lệnh sau:
+
+   .\upscale review "D:\DUONG_DAN\TEN_BUNDLE_V7"
+
+Bấm lưu quyết định trên trang cục bộ, rồi chạy lại đúng lệnh thư mục; V7 tự nạp đúng hồ sơ từng ảnh:
 
    .\upscale repair "D:\BO ANH" 1 --review defer
 
-Nếu chỉ duyệt một file, chạy lại đúng ảnh gốc:
+Không cần mở JSON. Cách --review-file dưới đây chỉ dành cho kỹ thuật/nâng cao:
 
    .\upscale repair test.png 1 --review-file "D:\DUONG_DAN\TEXT_REVIEW.json"
 
-Muốn bắt buộc tự duyệt mọi vùng, kể cả vùng OCR xanh:
+Muốn bắt buộc duyệt tay mọi vùng, kể cả vùng OCR xanh:
 
    .\upscale repair test.png 1 --review strict --review-file "D:\DUONG_DAN\TEXT_REVIEW.json"
 
@@ -122,7 +150,7 @@ Muốn bắt buộc tự duyệt mọi vùng, kể cả vùng OCR xanh:
 
    V2/V3/V4 nhận n từ 2 đến 20.
    V5 nhận n từ 1 đến 20; nên dùng n=1 để sửa layer nhẹ hoặc n=4 để có layer lớn.
-   V7 nhận n=1 hoặc n từ 2 đến 20: n=1 không cần GPU; n>=2 cần V3 CUDA.
+   V7 nhận n=1 hoặc n từ 2 đến 20; chế độ mặc định luôn cần V3 CUDA, kể cả n=1.
 
 
 VÍ DỤ TÊN FILE CÓ KHOẢNG TRẮNG:
@@ -136,8 +164,10 @@ LƯU Ý:
    - Không nên dùng n=100 vì ảnh sẽ quá lớn, rất nặng và khó mở.
    - V5 là file trung gian để sửa layer; sau khi sửa xong, xuất ảnh ghép rồi dùng
      V3 hoặc V4 nếu cần làm lớn/giao in.
-   - V7 chỉ sửa các vùng chữ được duyệt và nền trong footprint tương ứng. Nó không tự
-     phục dựng mọi hình minh họa, không bảo đảm đoán đúng chi tiết đã mất và không thay V4.
-   - Quy trình giao in nên dùng: V7 n=1 -> duyệt file REPAIRED -> V4 print với khổ mm/ICC.
+   - V7 phục dựng raster toàn ảnh bằng các bước có gate rồi Swin2SR fidelity đơn. Nếu AI bị
+     loại hoặc lỗi, fallback phải được ghi trong _KY_THUAT\QA.json; hãy kiểm tra trước khi dùng.
+   - AI có thể tạo nét hợp lý nhưng không chứng minh được chữ/chi tiết vốn đã mất. Luôn đọc lại
+     giá, số điện thoại, mã hàng và chính tả ở 100%.
+   - Quy trình giao in nên dùng: V7 n=1 -> duyệt 01_KET_QUA_DA_DAT.png -> V4 print với khổ mm/ICC.
    - Nếu bundle V7 ghi REVIEW_REQUIRED hoặc FAILED_QA thì chưa được coi là file giao in.
    - Khi nhà in cung cấp ICC profile riêng, hãy dùng đúng profile của họ cho bản in.

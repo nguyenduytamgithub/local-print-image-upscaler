@@ -15,9 +15,10 @@ Các thay đổi đáng chú ý của Local Print Image Upscaler được ghi t�
   thiếu `vie.traineddata` thì Tesseract không bỏ phiếu và không fallback English dưới nhãn tiếng Việt.
 - Thêm model tiếng Việt cục bộ `nrl-ai/vn-spell-correction-base` đã khóa revision để tạo đề xuất
   chính tả. Đề xuất không được tự áp dụng và có thể tắt hoàn toàn bằng `--no-language-model`.
-- Thêm quy trình duyệt bằng cửa sổ Windows hoặc `TEXT_REVIEW.json`: người dùng có thể nhập chữ đúng,
-  giữ nguyên vùng ảnh hoặc để vùng chưa chắc chắn ở trạng thái chờ. Hồ sơ duyệt bắt buộc SHA-256 nguồn
-  cùng fingerprint bbox + NFC OCR text; `strict` không tự duyệt cả vùng xanh.
+- Thêm giao diện duyệt cục bộ trên trình duyệt, ưu tiên Chrome, bằng `upscale review <bundle>` hoặc bí danh
+  `duyet`: người dùng có thể nhập chữ đúng, giữ nguyên vùng ảnh hoặc để vùng chưa chắc chắn ở trạng thái
+  chờ mà không phải mở JSON. Hồ sơ duyệt bắt buộc SHA-256 nguồn cùng fingerprint bbox + NFC OCR text;
+  `strict` không tự duyệt cả vùng xanh.
 - Thêm mask/gate nét chữ cũ, tái tạo nền có giới hạn theo từng footprint đã duyệt và kiểm tra pixel ngoài
   ROI không đổi. Nền vốn bị che luôn được khai báo là phần tổng hợp, không gọi là pixel gốc khôi phục.
 - Thêm render chữ Unicode NFC bằng font Windows thật trực tiếp ở kích thước cuối, kiểm tra coverage glyph,
@@ -26,19 +27,37 @@ Các thay đổi đáng chú ý của Local Print Image Upscaler được ghi t�
   `wght`/`wdth` của OpenType Variable Font. PNG không bị kéo giãn chữ; SVG lưu lại các trục và baseline thật.
 - Khóa exact font face, trục variable và tỷ lệ font từ source gate sang final x2..x20; PASS yêu cầu cả
   source geometry, final geometry và lock fidelity đạt.
-- Xuất bundle V7 gồm PNG repaired/clean base, SVG mixed raster/vector có đối tượng `<text>` chỉnh sửa được,
-  ảnh before/after, overlay, hồ sơ duyệt, QA và manifest có hash/trạng thái. Font Windows không được nhúng;
-  PNG repaired là bản tham chiếu vị trí khi máy khác thay font SVG.
+- Xuất bundle V7 với ba tên dễ dùng ở thư mục gốc: `01_KET_QUA_DA_DAT.png` hoặc
+  `01_XEM_TRUOC_CAN_DUYET.png`, `02_SO_SANH.png`, `03_CHINH_SUA.svg`; ảnh trung gian, hồ sơ duyệt, QA và
+  manifest được gom vào `_KY_THUAT`. Font Windows không được nhúng; PNG là bản tham chiếu vị trí khi máy
+  khác thay font SVG.
 - Thêm QA cho chữ cũ còn sót, seam, clipping, Unicode đọc lại, hình học/tâm chữ, thay đổi ngoài ROI và tính tái lập. Bundle
   chưa duyệt hoặc lỗi gate mang trạng thái `REVIEW_REQUIRED`/`FAILED_QA`, không tự nhận là bản giao in.
 - Thêm runtime OCR CPU V7 tách riêng, dependency lock, setup/check script và SHA-256 cho model PP-OCRv6
   cùng model đề xuất tiếng Việt. Ảnh người dùng và model vẫn ở máy cục bộ, không đưa lên cloud/Git.
+- Thêm phục dựng raster toàn ảnh cho V7: các pre-stage deblur/denoise/tăng chi tiết quan sát được có gate
+  và rollback, tiếp theo là checkpoint Swin2SR fidelity/PSNR đơn chạy cục bộ qua V3 CUDA. V7 không dùng GAN
+  hoặc fusion ba model trong đường này; lỗi/reject phải công bố fallback classical/Lanczos trong QA.
+- Thêm QA độ nét không gian 4×4 dựa trên đúng vị trí cạnh quan sát được ở ảnh nguồn. Ứng viên chỉ làm nét
+  một vùng nhưng làm mềm phần lớn vùng còn lại bị loại; ô phẳng/thiếu bằng chứng không bị gán nhầm là đạt.
+- Thêm nút duyệt an toàn `Giữ nguyên tất cả vùng còn lại`: chỉ giữ bitmap cho các vùng đang chờ bằng một
+  lần ghi nguyên tử, không bulk-replace và không thay chữ, giá, số điện thoại hay mã hàng.
 
 ### Changed
 
-- Phiên bản ứng dụng tăng lên `0.4.0`; V2/V3/V4/V5 được giữ nguyên và V7 dùng chung lệnh `upscale`.
-- V7 `n=1` không gọi V3 và không cần GPU. V7 `n=2..20` bắt buộc dùng V3 CUDA trên nền đã gỡ chữ,
-  sau đó vẽ lại chữ ở độ phân giải cuối.
+- Phiên bản ứng dụng tăng lên `0.4.0`; V2/V3/V4 được giữ nguyên và V7 dùng chung lệnh `upscale`.
+- V5 chuyển sang clean-matte mặc định: vật thể lấy lại đúng connected-component SAM đã ghi,
+  chữ làm sạch topology O/G/N, loại đường khung/vật lạ, phục hồi dấu theo glyph-anchor + màu và chạy
+  ViTMatte-S đã khóa hash chỉ trong topology đó. Renderer cho alpha phân số một envelope 1 px khi scale;
+  manifest có gate ownership độc lập với kiểm tra ảnh ghép. Preflight x1 còn kiểm alpha sau bước tái hợp
+  màu, chuyển hạt nền đơn lẻ về layer cha theo bằng chứng Lab/palette rồi dựng lại stack chính xác. Sau đó
+  alpha x1 được khóa byte-for-byte; solver 8-bit giải ngược đúng z-order để tối đa hóa nền sạch mà không tăng
+  alpha. Gate không gian FG8/BG4 ở mức 64/128/192 chặn đảo rác, nhập nét, lấp/sinh/chia lỗ và xâm nhập lõi
+  khoảng âm trước khi PSD/ORA/PNG được công bố.
+- V7 mặc định gọi Swin2SR fidelity đơn qua V3 CUDA cho cả `n=1` lẫn `n=2..20`. `n=1` cũng suy luận native
+  x4 rồi downsample có kiểm soát về x1; chữ đã duyệt được vẽ lại ở độ phân giải cuối.
+- Giao diện duyệt V7 gửi và flush đầy đủ phản hồi `Lưu và hoàn tất` trước khi đóng máy chủ cục bộ, tránh
+  cảnh báo `Failed to fetch` giả sau khi các quyết định đã được lưu nguyên tử.
 - Batch V7 tự snapshot/nạp review từng ảnh khi chạy lại; output trùng tên được tách theo định danh đường
   dẫn và quy trình publish có journal/rollback để giữ bundle tốt trước đó khi có lỗi.
 - Tài liệu phân biệt V7 sửa chữ/nền và SVG text editable với V4 Print: V7 không xuất PDF/X-4, CMYK,
