@@ -3,12 +3,19 @@ HƯỚNG DẪN NHANH — LOCAL PRINT IMAGE UPSCALER V2/V3/V4/V5/V7
 
 1. BỎ ẢNH GỐC VÀO THƯ MỤC:
 
+   Trên đúng máy hiện tại:
    C:\Users\Admin\Desktop\RESIZE\INPUT
+
+   Trên máy khác: bỏ ảnh vào thư mục INPUT nằm trong thư mục dự án vừa clone.
 
 
 2. MỞ POWERSHELL VÀ ĐỨNG ĐÚNG THƯ MỤC:
 
+   Ví dụ đúng cho máy hiện tại:
    cd "C:\Users\Admin\Desktop\RESIZE"
+
+   Máy khác dùng đường dẫn thật nơi đã clone, ví dụ:
+   cd "D:\DUONG_DAN\local-print-image-upscaler"
 
 
 3. CHỌN ĐÚNG PHIÊN BẢN CẦN DÙNG:
@@ -45,21 +52,72 @@ V4 — BỘ FILE GIAO NHÀ IN
    Nhận bộ file tại: OUTPUT\V4_VECTOR
 
 
-V5 — TÁCH LAYER ĐỂ CHỈNH SỬA
+V5 PRO — TÁCH LAYER CÓ KIỂM KÊ VÀ DUYỆT
 
    .\upscale layers test.png 1
 
-   Dùng n=1 khi muốn file layer nhẹ để sửa trước.
-   Xuất PSD + ORA + ZIP layer/mask và các file xem trước.
-   Mask vật thể giữ đúng vùng semantic; viền nền, bóng và mảnh rời không được nới theo bán kính inpaint.
-   Chữ được khoét sạch lòng O/G/N, bảo vệ dấu tiếng Việt và làm mịn mép bằng ViTMatte cục bộ.
-   Trước khi xuất, V5 tự ghép thử ở x1 để chuyển hạt nền còn dính về layer cha mà không làm mất dấu thật.
-   Khi phóng xN, alpha x1 được khóa; V5 chỉ giải lại màu nền/tiền cảnh, không được bơm alpha làm bít lòng chữ.
+   Dùng n=1 để tạo master layer nhẹ, review và sửa trước.
+   V5 layers CHỈ nhận hệ số NGUYÊN x1..x20. Nếu cần x1,5/x2,5: chạy V5 x1, review/sửa,
+   flatten thành PNG rồi dùng upscale high hoặc upscale print với hệ số đích.
+   V5 Pro kiểm kê chữ/QR/khung/chi tiết, chạy DINO + SAM + BiRefNet và dùng LayerD làm nguồn
+   đề xuất phụ trợ. LayerD không tự quyết layer cuối và không thay được bước review/QA.
+   Cụm LayerD không qua policy an toàn được tách thành từng mảnh nguyên tử riêng, unresolved và
+   không move-safe; chương trình không union chúng thành một layer kéo dính nhiều chi tiết.
+   BiRefNet báo refinement thất bại thì fallback mask chỉ để xem/duyệt, không bao giờ tự xác nhận.
+   Semantic product sạch nhưng chưa có bằng chứng instance độc lập sẽ ghi
+   atomicity_unverified/whole_visible_union. Chỉ khi bằng chứng độc lập nói rõ count > 1 mới ghi
+   compound_subassembly. Cả hai có thể move-safe như toàn union nhưng vẫn unresolved, không
+   auto-confirmed/auto-atomic và không bịa đường chia bị che. Trang review giải thích lý do theo node.
+   Không còn giới hạn 24 layer: mọi proposal phải được gán, từ chối có lý do hoặc để chờ duyệt.
+   Xuất PSD khi trong giới hạn, luôn có ORA + ZIP layer/mask + inventory + QA.
    Nhận bộ file tại: OUTPUT\V5_LAYERS
 
-   Nếu cần tài liệu layer lớn x4 ngay từ đầu:
+   V5 giữ clean background sạch trên toàn canvas. Panel/frame/line dùng bề mặt tham chiếu sạch;
+   mọi sai khác RGB/antialias so với bề mặt đó và mọi pixel chưa có ownership nhìn thấy nằm trong
+   layer review ở TRÊN CÙNG:
+   REVIEW - SOURCE REMAINDER (hide to reveal clean background)
+   Giữ layer này hiện để preview/scale bám diện mạo nguồn; ẩn nó để thấy nền và geometry sạch.
+   Đây là layer giữ pixel để kiểm tra, KHÔNG phải vật thể semantic và không nên kéo/di chuyển riêng.
+   Layer cố ý ở trạng thái unresolved nên bundle còn REVIEW_REQUIRED cho tới khi được duyệt.
+   Geometry residual thiếu clean reference và chữ OCR bị lẫn mảng nền/nhiều dải/vật thể kề cũng luôn
+   chờ duyệt, không move-safe. REVIEW_REQUIRED là kết quả bình thường cần xem lại, không phải treo.
+   Frame chỉ được dựng canonical thẳng/khép kín từ lỗ trong trội + bằng chứng sạch cạnh bên/đáy;
+   ribbon/chữ dính contour bị loại. QA xem full_support thật: frame phải là vòng có lỗ trong trội,
+   panel phải đặc, line không được kéo theo mảng lớn theo trục vuông góc.
+
+   Nếu trạng thái chưa PASS, mở duyệt mà không sửa JSON:
+
+   .\upscale review ".\OUTPUT\V5_LAYERS\test_V5_LAYERS_x1"
+
+   Màn hình mặc định để ảnh sạch; bấm một dòng trong danh sách để xem riêng mục đó.
+   Bật "Hiện toàn bộ mục chờ duyệt" để xem tổng quan, hoặc "Hiện cả mục kỹ thuật/đã xử lý"
+   để xem toàn bộ ledger; mục đang ẩn vẫn còn trong checkpoint và QA.
+
+   Review chỉ lưu checkpoint. Sau đó chạy lại đúng lệnh để resume và dựng lại PSD/ORA:
+
+   .\upscale layers test.png 1
+
+   Khi source/hash, hệ số hoặc proposal ledger không còn khớp, checkpoint bị từ chối để tránh áp nhầm.
+   Group tạo trong trang review sẽ thành group thật trong PSD/ORA. Chỉ layer cùng parent trực tiếp
+   và liền nhau trong thứ tự mới được nhóm; quy tắc này giữ composite không đổi.
+   V5 còn tự tạo folder pass-through, không gộp leaf/đổi thứ tự/pixel. Hai bundle K thật đã kiểm định:
+   sau có 44 auto-folder/999 leaf, root 761 -> 7, sibling 1.018 -> 63; truoc có 76 auto-folder/881
+   leaf, root 323 -> 7, sibling 910 -> 105. Cả hai vẫn REVIEW_REQUIRED: đây chỉ là số đo tổ chức cây
+   tài liệu, không chứng minh layer sạch hoặc đúng ngữ
+   nghĩa. Group người dùng hợp lệ luôn thắng; group cũ không còn an toàn sẽ được dissolve có audit và
+   không bị resume thêm lại.
+   Job nhỏ có 1 contact sheet. Job lớn có cover + CONTACT_SHEETS\page_*.png, tối đa 32 card/trang,
+   mỗi ảnh không quá 4.096 px/cạnh hoặc 16 MP. Page có trong manifest ngoài; ZIP layer không đổi.
+   Với V5 hãy dùng --review gui, defer hoặc auto. Tên strict cũ không phải chế độ V5 riêng và
+   không có nghĩa mọi layer đã buộc phải được quyết định.
+
+   Chỉ khi thật sự cần tài liệu layer lớn x4 ngay từ đầu:
 
    .\upscale layers test.png 4
+
+   Quy trình nhẹ nên dùng: V5 x1 -> review -> sửa PSD/ORA -> xuất PNG ghép ->
+   .\upscale high PNG-DA-SUA.png 4
+   hoặc dùng .\upscale print ... để tạo bộ giao nhà in.
 
 
 V7 — PHỤC DỰNG ẢNH MỜ + SỬA CHỮ GÃY/SAI
@@ -96,12 +154,12 @@ V7 — PHỤC DỰNG ẢNH MỜ + SỬA CHỮ GÃY/SAI
    03_CHINH_SUA.svg               chữ Unicode có thể chỉnh
    _KY_THUAT                      JSON, ảnh QA và file nội bộ
 
-   Mở lại màn hình duyệt mà không cần đụng JSON:
+   Mở lại màn hình duyệt V5 hoặc V7 mà không cần đụng JSON:
 
-   .\upscale review "D:\DUONG_DAN\TEN_BUNDLE_V7"
+   .\upscale review "D:\DUONG_DAN\TEN_BUNDLE_V5_HOAC_V7"
 
    Có thể gõ "duyet" thay cho "review".
-   Nếu chỉ cần làm rõ ảnh và muốn giữ nguyên toàn bộ chữ/số đang có, bấm
+   Riêng giao diện V7: nếu chỉ cần làm rõ ảnh và muốn giữ nguyên toàn bộ chữ/số đang có, bấm
    "Giữ nguyên tất cả vùng còn lại" rồi bấm "Lưu và hoàn tất" để đóng phiên duyệt.
    Các quyết định được lưu ngay khi bấm; nút này không áp dụng đề xuất OCR, không thay
    giá, số điện thoại hoặc mã hàng.
@@ -112,7 +170,7 @@ V7 — PHỤC DỰNG ẢNH MỜ + SỬA CHỮ GÃY/SAI
    V2 = nhanh                  -> .\upscale
    V3 = PNG AI đẹp            -> .\upscale high
    V4 = giao nhà in           -> .\upscale print
-   V5 = tách và chỉnh layer   -> .\upscale layers
+   V5 = layer có kiểm kê/duyệt -> .\upscale layers
    V7 = phục dựng toàn ảnh + sửa chữ -> .\upscale repair
 
 
@@ -123,15 +181,16 @@ Thay tên ảnh bằng đường dẫn thư mục. Tất cả ảnh dùng chung 
    V2: .\upscale "D:\BO ANH" 4
    V3: .\upscale high "D:\BO ANH" 4
    V4: .\upscale print "D:\BO ANH" 4 --width-mm 3000
-   V5: .\upscale layers "D:\BO ANH" 1
+   V5: .\upscale layers "D:\BO ANH" 1 --review defer
    V7: .\upscale repair "D:\BO ANH" 1 --review defer
 
-V7 chạy thư mục không mở hàng loạt cửa sổ. Mở từng bundle cần duyệt bằng lệnh sau:
+V5 và V7 chạy thư mục không mở hàng loạt cửa sổ. Mở từng bundle cần duyệt bằng lệnh sau:
 
-   .\upscale review "D:\DUONG_DAN\TEN_BUNDLE_V7"
+   .\upscale review "D:\DUONG_DAN\TEN_BUNDLE_V5_HOAC_V7"
 
-Bấm lưu quyết định trên trang cục bộ, rồi chạy lại đúng lệnh thư mục; V7 tự nạp đúng hồ sơ từng ảnh:
+Bấm lưu quyết định trên trang cục bộ, rồi chạy lại đúng lệnh thư mục; launcher tự nạp đúng hồ sơ từng ảnh:
 
+   .\upscale layers "D:\BO ANH" 1 --review defer
    .\upscale repair "D:\BO ANH" 1 --review defer
 
 Không cần mở JSON. Cách --review-file dưới đây chỉ dành cho kỹ thuật/nâng cao:
@@ -149,7 +208,7 @@ Muốn bắt buộc duyệt tay mọi vùng, kể cả vùng OCR xanh:
    n=10: chiều rộng và chiều cao đều lớn gấp 10 lần.
 
    V2/V3/V4 nhận n từ 2 đến 20.
-   V5 nhận n từ 1 đến 20; nên dùng n=1 để sửa layer nhẹ hoặc n=4 để có layer lớn.
+   V5 nhận n từ 1 đến 20; nên dùng n=1 để review/sửa layer rồi mới upscale PNG đã ghép.
    V7 nhận n=1 hoặc n từ 2 đến 20; chế độ mặc định luôn cần V3 CUDA, kể cả n=1.
 
 
@@ -162,8 +221,21 @@ LƯU Ý:
 
    - Chương trình không sửa hoặc xóa ảnh gốc trong INPUT.
    - Không nên dùng n=100 vì ảnh sẽ quá lớn, rất nặng và khó mở.
-   - V5 là file trung gian để sửa layer; sau khi sửa xong, xuất ảnh ghép rồi dùng
+   - V5 là file trung gian để sửa layer; sau khi review/sửa xong, xuất ảnh ghép rồi dùng
      V3 hoặc V4 nếu cần làm lớn/giao in.
+   - V5 fail-closed: REVIEW_REQUIRED vẫn được xuất để mở review; hard QA FAIL không publish và
+     không thay bundle tốt trước đó. Preview gần giống nguồn không chứng minh đã tách đủ/đúng;
+     hãy xem _KY_THUAT\QA_REPORT.html.
+   - Nếu metadata ghi refinement/cụm LayerD bị từ chối mà node vẫn tự nhận auto-confirmed hoặc
+     move-safe, QA coi đó là mâu thuẫn cứng và launcher chặn publish.
+   - QA cũng chặn claim auto/move-safe khi geometry-cleanliness hoặc text-purity không đạt.
+   - SOURCE REMAINDER ở trên cùng: hiện = giữ diện mạo nguồn/master; ẩn = lộ clean background và
+     panel/frame/line sạch. Layer này cố ý REVIEW_REQUIRED, không phải logo/chữ/sản phẩm đã tách
+     semantic và không phải layer move-safe.
+   - Lệnh review chỉ lưu checkpoint, không tự sửa PSD/ORA cũ. Phải chạy lại đúng lệnh layers.
+   - LayerD chỉ đưa proposal matte/nền; ownership cuối còn qua inventory, fusion, review và QA.
+   - Pixel bị che và layer graph gốc không còn trong bitmap. Nền dưới vật thể là phần tổng hợp;
+     không có cam kết 99,99% hay khôi phục thần kỳ file thiết kế gốc.
    - V7 phục dựng raster toàn ảnh bằng các bước có gate rồi Swin2SR fidelity đơn. Nếu AI bị
      loại hoặc lỗi, fallback phải được ghi trong _KY_THUAT\QA.json; hãy kiểm tra trước khi dùng.
    - AI có thể tạo nét hợp lý nhưng không chứng minh được chữ/chi tiết vốn đã mất. Luôn đọc lại

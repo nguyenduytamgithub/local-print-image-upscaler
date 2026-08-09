@@ -125,10 +125,32 @@ class V7ReviewCommandTests(unittest.TestCase):
                 with self.assertRaises(UserError):
                     upscale_cli.main(arguments)
 
-    def test_cmd_routes_both_review_aliases_to_v7_python(self) -> None:
+    def test_cmd_routes_review_aliases_without_requiring_v7_python(self) -> None:
         command_file = (PROJECT_ROOT / "upscale.cmd").read_text(encoding="utf-8")
-        self.assertIn('if /I "%~1"=="review" set "RESIZE_PYTHON=%RESIZE_ROOT%APP\\engines\\V7', command_file)
-        self.assertIn('if /I "%~1"=="duyet" set "RESIZE_PYTHON=%RESIZE_ROOT%APP\\engines\\V7', command_file)
+        for alias in ("review", "duyet"):
+            self.assertNotIn(
+                f'if /I "%~1"=="{alias}" set '
+                '"RESIZE_PYTHON=%RESIZE_ROOT%APP\\engines\\V7',
+                command_file,
+            )
+            self.assertIn(
+                f'if /I "%~1"=="{alias}" if exist '
+                '"%RESIZE_ROOT%APP\\engines\\V3\\.venv\\Scripts\\python.exe"',
+                command_file,
+            )
+            self.assertIn(
+                f'if /I "%~1"=="{alias}" if not exist '
+                '"%RESIZE_ROOT%APP\\engines\\V3\\.venv\\Scripts\\python.exe" if exist '
+                '"%RESIZE_ROOT%APP\\engines\\V5\\.venv\\Scripts\\python.exe"',
+                command_file,
+            )
+            self.assertIn(
+                f'if /I "%~1"=="{alias}" if not exist '
+                '"%RESIZE_ROOT%APP\\engines\\V3\\.venv\\Scripts\\python.exe" if not exist '
+                '"%RESIZE_ROOT%APP\\engines\\V5\\.venv\\Scripts\\python.exe" if exist '
+                '"%RESIZE_ROOT%APP\\engines\\V7\\.venv\\Scripts\\python.exe"',
+                command_file,
+            )
 
 
 if __name__ == "__main__":

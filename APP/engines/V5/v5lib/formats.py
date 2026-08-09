@@ -22,7 +22,8 @@ from .model import LayerSpec
 from .restore import make_soft_alpha
 
 
-Image.MAX_IMAGE_PIXELS = 500_000_000
+V5_MAX_IMAGE_PIXELS = 500_000_000
+Image.MAX_IMAGE_PIXELS = V5_MAX_IMAGE_PIXELS
 
 PSD_MAX_DIMENSION = 30_000
 PSD_SAFE_RAW_BYTES = 1_600_000_000
@@ -33,6 +34,15 @@ ORA_XML_MAX_BYTES = 16 * 1024 * 1024
 ORA_MAX_MEMBERS = 4096
 ORA_ROUNDTRIP_MAX_ERROR = 1
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+CONTACT_SHEET_COLUMNS = 4
+CONTACT_SHEET_CARD_WIDTH = 300
+CONTACT_SHEET_CARD_HEIGHT = 250
+CONTACT_SHEET_LABEL_HEIGHT = 42
+CONTACT_SHEET_PAGE_ROWS = 8
+CONTACT_SHEET_PAGE_CAPACITY = CONTACT_SHEET_COLUMNS * CONTACT_SHEET_PAGE_ROWS
+CONTACT_SHEET_MAX_DIMENSION = 4096
+CONTACT_SHEET_MAX_PIXELS = 16_000_000
+CONTACT_SHEET_OVERVIEW_CARDS = 16
 
 
 @dataclass(slots=True)
@@ -47,6 +57,13 @@ class RenderedLayer:
     @property
     def bbox(self) -> tuple[int, int, int, int]:
         return self.left, self.top, self.left + self.rgba.width, self.top + self.rgba.height
+
+
+@dataclass(slots=True)
+class _UserGroupPlan:
+    group_id: str
+    name: str
+    members: list[RenderedLayer]
 
 
 def sha256_file(path: Path) -> str:
@@ -1462,13 +1479,91 @@ def _layer_tree(
     return roots, children
 
 
+def _user_group_layout(
+    rendered: list[RenderedLayer],
+    roots: list[RenderedLayer],
+    children: dict[str, list[RenderedLayer]],
+    user_groups: list[dict[str, object]] | None,
+) -> tuple[dict[str, _UserGroupPlan], set[str]]:
+    """Validate review groups without changing bottom-to-top pixel order."""
+
+    by_id = {item.spec.layer_id: item for item in rendered}
+    parent_by_id = {
+        item.spec.layer_id: (
+            str(item.spec.metadata.get("parent_id"))
+            if item.spec.metadata.get("parent_id") in by_id
+            else None
+        )
+        for item in rendered
+    }
+    first_member: dict[str, _UserGroupPlan] = {}
+    grouped_members: set[str] = set()
+    seen_group_ids: set[str] = set()
+    for raw in user_groups or []:
+        if not isinstance(raw, dict):
+            raise RuntimeError("V5 review group record is not an object")
+        group_id = str(raw.get("id") or "").strip()
+        name = str(raw.get("name") or "").strip()
+        member_ids = [str(value) for value in raw.get("member_ids", [])]
+        if not group_id or group_id in seen_group_ids or not name:
+            raise RuntimeError("V5 review group has an invalid/duplicate id or empty name")
+        if len(member_ids) < 2 or len(member_ids) != len(set(member_ids)):
+            raise RuntimeError(f"V5 review group {group_id} needs distinct members")
+        if set(member_ids) - set(by_id):
+            raise RuntimeError(f"V5 review group {group_id} references a missing layer")
+        if grouped_members.intersection(member_ids):
+            raise RuntimeError("A V5 layer may belong to only one user group")
+        parents = {parent_by_id[member_id] for member_id in member_ids}
+        if len(parents) != 1:
+            raise RuntimeError(
+                f"V5 review group {group_id} members must share one container parent"
+            )
+        parent_id = next(iter(parents))
+        siblings = roots if parent_id is None else children.get(parent_id, [])
+        positions = sorted(
+            next(index for index, item in enumerate(siblings) if item.spec.layer_id == member_id)
+            for member_id in member_ids
+        )
+        if positions != list(range(positions[0], positions[-1] + 1)):
+            raise RuntimeError(
+                f"V5 review group {group_id} members are not contiguous in layer order"
+            )
+        ordered_members = [siblings[index] for index in positions]
+        plan = _UserGroupPlan(group_id, name, ordered_members)
+        first_member[ordered_members[0].spec.layer_id] = plan
+        grouped_members.update(member_ids)
+        seen_group_ids.add(group_id)
+    return first_member, grouped_members
+
+
+def _grouped_siblings(
+    siblings: list[RenderedLayer],
+    first_member: dict[str, _UserGroupPlan],
+    grouped_members: set[str],
+) -> list[RenderedLayer | _UserGroupPlan]:
+    result: list[RenderedLayer | _UserGroupPlan] = []
+    for item in siblings:
+        identifier = item.spec.layer_id
+        plan = first_member.get(identifier)
+        if plan is not None:
+            result.append(plan)
+        elif identifier not in grouped_members:
+            result.append(item)
+    return result
+
+
 def _expected_container_tree(
-    background_size: tuple[int, int], rendered: list[RenderedLayer]
+    background_size: tuple[int, int],
+    rendered: list[RenderedLayer],
+    user_groups: list[dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     """Return the exact bottom-to-top tree both PSD and ORA must preserve."""
 
     width, height = background_size
     roots, children = _layer_tree(rendered)
+    first_member, grouped_members = _user_group_layout(
+        rendered, roots, children, user_groups
+    )
 
     def pixel(name: str, item: RenderedLayer) -> dict[str, object]:
         return {
@@ -1488,9 +1583,19 @@ def _expected_container_tree(
             "visible": True,
             "children_bottom_to_top": [
                 pixel(f"BASE - {item.spec.name}", item),
-                *(node(child) for child in node_children),
+                *(entry(child) for child in _grouped_siblings(node_children, first_member, grouped_members)),
             ],
         }
+
+    def entry(item: RenderedLayer | _UserGroupPlan) -> dict[str, object]:
+        if isinstance(item, _UserGroupPlan):
+            return {
+                "name": f"USER GROUP - {item.name}",
+                "kind": "group",
+                "visible": True,
+                "children_bottom_to_top": [node(member) for member in item.members],
+            }
+        return node(item)
 
     return [
         {
@@ -1499,7 +1604,10 @@ def _expected_container_tree(
             "visible": True,
             "bbox": [0, 0, width, height],
         },
-        *(node(item) for item in roots),
+        *(
+            entry(item)
+            for item in _grouped_siblings(roots, first_member, grouped_members)
+        ),
     ]
 
 
@@ -1564,6 +1672,7 @@ def export_psd(
     expected_composite: Image.Image | None = None,
     *,
     icc_profile: bytes | None = None,
+    user_groups: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     from psd_tools import PSDImage
     from psd_tools.api.layers import Group, PixelLayer
@@ -1585,7 +1694,7 @@ def export_psd(
             "reason": "PSD safety estimate exceeds 1.6 GB; ORA and LAYERS.zip were kept",
             "estimated_raw_bytes": estimated_raw,
         }
-    expected_tree = _expected_container_tree(background.size, rendered)
+    expected_tree = _expected_container_tree(background.size, rendered, user_groups)
     psd = PSDImage.new("RGBA", (width, height), color=(0, 0, 0, 0), depth=8)
     psd.background_color = None
     if icc_profile:
@@ -1606,6 +1715,9 @@ def export_psd(
     # MacRoman fallback, which is required for Vietnamese names.
     background_layer.name = "00 BACKGROUND - SYNTHESIZED HIDDEN PIXELS"
     roots, children = _layer_tree(rendered)
+    first_member, grouped_members = _user_group_layout(
+        rendered, roots, children, user_groups
+    )
 
     def add_node(item: RenderedLayer, parent) -> None:
         node_children = children.get(item.spec.layer_id, [])
@@ -1625,8 +1737,10 @@ def export_psd(
                 compression=Compression.RLE,
             )
             base.name = f"BASE - {item.spec.name}"
-            for child in node_children:
-                add_node(child, group)
+            for child in _grouped_siblings(
+                node_children, first_member, grouped_members
+            ):
+                add_entry(child, group)
         else:
             layer = PixelLayer.frompil(
                 item.rgba,
@@ -1638,8 +1752,18 @@ def export_psd(
             )
             layer.name = item.spec.name
 
-    for root_item in roots:
-        add_node(root_item, psd)
+    def add_entry(item: RenderedLayer | _UserGroupPlan, parent) -> None:
+        if isinstance(item, _UserGroupPlan):
+            group = Group.new(parent, name="User Group", open_folder=True)
+            group.name = f"USER GROUP - {item.name}"
+            group.blend_mode = BlendMode.PASS_THROUGH
+            for member in item.members:
+                add_node(member, group)
+            return
+        add_node(item, parent)
+
+    for root_item in _grouped_siblings(roots, first_member, grouped_members):
+        add_entry(root_item, psd)
     psd.save(path)
     reopened = PSDImage.open(path)
     if reopened.version != 1:
@@ -1761,9 +1885,10 @@ def export_ora(
     composite: Image.Image,
     *,
     icc_profile: bytes | None = None,
+    user_groups: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     width, height = background.size
-    expected_tree = _expected_container_tree(background.size, rendered)
+    expected_tree = _expected_container_tree(background.size, rendered, user_groups)
     root = ET.Element(
         "image",
         {
@@ -1783,6 +1908,9 @@ def export_ora(
         source_by_id[item.spec.layer_id] = source
         stored.append((source, item.rgba))
     roots, children = _layer_tree(rendered)
+    first_member, grouped_members = _user_group_layout(
+        rendered, roots, children, user_groups
+    )
 
     def add_ora_node(parent_xml: ET.Element, item: RenderedLayer) -> None:
         node_children = children.get(item.spec.layer_id, [])
@@ -1793,17 +1921,36 @@ def export_ora(
                 {"name": f"GROUP - {item.spec.name}", "isolation": "auto"},
             )
             # Topmost XML child first; base is always at the bottom of its group.
-            for child in reversed(node_children):
-                add_ora_node(group, child)
+            grouped_children = _grouped_siblings(
+                node_children, first_member, grouped_members
+            )
+            for child in reversed(grouped_children):
+                add_ora_entry(group, child)
             base_element = _ora_layer_element(item, source_by_id[item.spec.layer_id])
             base_element.set("name", f"BASE - {item.spec.name}")
             group.append(base_element)
         else:
             parent_xml.append(_ora_layer_element(item, source_by_id[item.spec.layer_id]))
 
+    def add_ora_entry(
+        parent_xml: ET.Element,
+        item: RenderedLayer | _UserGroupPlan,
+    ) -> None:
+        if isinstance(item, _UserGroupPlan):
+            group = ET.SubElement(
+                parent_xml,
+                "stack",
+                {"name": f"USER GROUP - {item.name}", "isolation": "auto"},
+            )
+            for member in reversed(item.members):
+                add_ora_node(group, member)
+            return
+        add_ora_node(parent_xml, item)
+
     # OpenRaster stores the topmost root first.
-    for root_item in reversed(roots):
-        add_ora_node(stack, root_item)
+    grouped_roots = _grouped_siblings(roots, first_member, grouped_members)
+    for root_item in reversed(grouped_roots):
+        add_ora_entry(stack, root_item)
     background_source = "data/background.png"
     ET.SubElement(
         stack,
@@ -1965,7 +2112,10 @@ def validate_ora(
             width, height = int(tree.attrib["w"]), int(tree.attrib["h"])
         except (KeyError, ValueError) as exc:
             raise RuntimeError("Invalid ORA canvas dimensions.") from exc
-        if width <= 0 or height <= 0 or width * height > Image.MAX_IMAGE_PIXELS:
+        # Some third-party image adapters temporarily disable Pillow's global
+        # decompression-bomb limit by setting it to None. ORA validation must
+        # remain fail-closed and independent of that mutable process global.
+        if width <= 0 or height <= 0 or width * height > V5_MAX_IMAGE_PIXELS:
             raise RuntimeError("Invalid ORA canvas dimensions.")
         has_xres, has_yres = "xres" in tree.attrib, "yres" in tree.attrib
         if has_xres != has_yres:
@@ -2170,6 +2320,108 @@ def validate_ora(
         }
 
 
+def _contact_sheet_checker() -> Image.Image:
+    checker = Image.new(
+        "RGB",
+        (CONTACT_SHEET_CARD_WIDTH, CONTACT_SHEET_CARD_HEIGHT),
+        (220, 220, 220),
+    )
+    draw = ImageDraw.Draw(checker)
+    for cy in range(0, CONTACT_SHEET_CARD_HEIGHT, 20):
+        for cx in range(0, CONTACT_SHEET_CARD_WIDTH, 20):
+            if (cx // 20 + cy // 20) % 2:
+                draw.rectangle((cx, cy, cx + 19, cy + 19), fill=(180, 180, 180))
+    return checker
+
+
+def _render_contact_sheet_grid(
+    cards: list[tuple[str, Image.Image]],
+    *,
+    heading: tuple[str, str] | None = None,
+) -> Image.Image:
+    if not cards:
+        raise ValueError("A V5 contact sheet needs at least one card.")
+    header_h = 72 if heading else 0
+    rows = math.ceil(len(cards) / CONTACT_SHEET_COLUMNS)
+    width = CONTACT_SHEET_COLUMNS * CONTACT_SHEET_CARD_WIDTH
+    height = header_h + rows * (CONTACT_SHEET_CARD_HEIGHT + CONTACT_SHEET_LABEL_HEIGHT)
+    if (
+        width > CONTACT_SHEET_MAX_DIMENSION
+        or height > CONTACT_SHEET_MAX_DIMENSION
+        or width * height > CONTACT_SHEET_MAX_PIXELS
+    ):
+        raise RuntimeError(
+            f"V5 contact sheet page {width}x{height} exceeds its bounded image policy."
+        )
+    sheet = Image.new("RGB", (width, height), (38, 38, 42))
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default(size=16)
+    if heading:
+        draw.text((12, 10), heading[0], fill="white", font=font)
+        draw.text((12, 38), heading[1], fill=(205, 205, 210), font=font)
+    checker_template = _contact_sheet_checker()
+    for index, (name, artwork) in enumerate(cards):
+        column, row = index % CONTACT_SHEET_COLUMNS, index // CONTACT_SHEET_COLUMNS
+        x = column * CONTACT_SHEET_CARD_WIDTH
+        y = header_h + row * (CONTACT_SHEET_CARD_HEIGHT + CONTACT_SHEET_LABEL_HEIGHT)
+        checker = checker_template.copy()
+        thumbnail = artwork.copy()
+        thumbnail.thumbnail(
+            (CONTACT_SHEET_CARD_WIDTH - 16, CONTACT_SHEET_CARD_HEIGHT - 16),
+            Image.Resampling.LANCZOS,
+        )
+        checker.paste(
+            thumbnail,
+            (
+                (CONTACT_SHEET_CARD_WIDTH - thumbnail.width) // 2,
+                (CONTACT_SHEET_CARD_HEIGHT - thumbnail.height) // 2,
+            ),
+            thumbnail if thumbnail.mode == "RGBA" else None,
+        )
+        sheet.paste(checker, (x, y))
+        draw.text(
+            (x + 8, y + CONTACT_SHEET_CARD_HEIGHT + 8),
+            name[:34],
+            fill="white",
+            font=font,
+        )
+    return sheet
+
+
+def _contact_sheet_overview_cards(
+    cards: list[tuple[str, Image.Image]],
+) -> list[tuple[str, Image.Image]]:
+    if len(cards) <= CONTACT_SHEET_OVERVIEW_CARDS:
+        indices = list(range(len(cards)))
+    else:
+        last = len(cards) - 1
+        indices = [
+            round(index * last / (CONTACT_SHEET_OVERVIEW_CARDS - 1))
+            for index in range(CONTACT_SHEET_OVERVIEW_CARDS)
+        ]
+    digits = max(3, len(str(len(cards))))
+    return [
+        (
+            f"{index + 1:0{digits}d}/{len(cards):0{digits}d} {cards[index][0]}",
+            cards[index][1],
+        )
+        for index in indices
+    ]
+
+
+def _clear_contact_sheet_pages(directory: Path) -> None:
+    if not directory.is_dir():
+        return
+    for page in directory.glob("page_*.png"):
+        if page.is_file():
+            page.unlink()
+    try:
+        directory.rmdir()
+    except OSError:
+        # Preserve any unrelated user file rather than recursively deleting it.
+        pass
+
+
 def export_contact_sheet(
     path: Path,
     background: Image.Image,
@@ -2177,33 +2429,44 @@ def export_contact_sheet(
     *,
     icc_profile: bytes | None = None,
 ) -> None:
+    """Write one legacy-sized sheet for small jobs or a bounded cover plus pages."""
+
     cards: list[tuple[str, Image.Image]] = [("BACKGROUND", background.convert("RGBA"))]
     cards.extend((item.spec.name, item.rgba) for item in rendered)
-    columns = 4
-    card_w, card_h, label_h = 300, 250, 42
-    rows = math.ceil(len(cards) / columns)
-    sheet = Image.new("RGB", (columns * card_w, rows * (card_h + label_h)), (38, 38, 42))
-    draw = ImageDraw.Draw(sheet)
-    font = ImageFont.load_default(size=16)
-    for index, (name, artwork) in enumerate(cards):
-        column, row = index % columns, index // columns
-        x, y = column * card_w, row * (card_h + label_h)
-        checker = Image.new("RGB", (card_w, card_h), (220, 220, 220))
-        checker_draw = ImageDraw.Draw(checker)
-        for cy in range(0, card_h, 20):
-            for cx in range(0, card_w, 20):
-                if (cx // 20 + cy // 20) % 2:
-                    checker_draw.rectangle((cx, cy, cx + 19, cy + 19), fill=(180, 180, 180))
-        thumbnail = artwork.copy()
-        thumbnail.thumbnail((card_w - 16, card_h - 16), Image.Resampling.LANCZOS)
-        checker.paste(
-            thumbnail,
-            ((card_w - thumbnail.width) // 2, (card_h - thumbnail.height) // 2),
-            thumbnail if thumbnail.mode == "RGBA" else None,
+    pages_dir = path.parent / "CONTACT_SHEETS"
+    _clear_contact_sheet_pages(pages_dir)
+    if len(cards) <= CONTACT_SHEET_PAGE_CAPACITY:
+        save_color_png(_render_contact_sheet_grid(cards), path, icc_profile)
+        return
+
+    page_count = math.ceil(len(cards) / CONTACT_SHEET_PAGE_CAPACITY)
+    page_digits = max(3, len(str(page_count)))
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    for page_index, start in enumerate(
+        range(0, len(cards), CONTACT_SHEET_PAGE_CAPACITY), 1
+    ):
+        stop = min(start + CONTACT_SHEET_PAGE_CAPACITY, len(cards))
+        page = _render_contact_sheet_grid(
+            cards[start:stop],
+            heading=(
+                f"V5 CONTACT SHEET - PAGE {page_index:0{page_digits}d}/{page_count:0{page_digits}d}",
+                f"CARDS {start + 1}-{stop} OF {len(cards)}",
+            ),
         )
-        sheet.paste(checker, (x, y))
-        draw.text((x + 8, y + card_h + 8), name[:34], fill="white", font=font)
-    save_color_png(sheet, path, icc_profile)
+        save_color_png(
+            page,
+            pages_dir / f"page_{page_index:0{page_digits}d}.png",
+            icc_profile,
+        )
+    overview = _render_contact_sheet_grid(
+        _contact_sheet_overview_cards(cards),
+        heading=(
+            "V5 CONTACT SHEET - BOUNDED OVERVIEW",
+            f"{len(cards)} CARDS; DETAILS: CONTACT_SHEETS/"
+            f"page_{1:0{page_digits}d}.png ... page_{page_count:0{page_digits}d}.png",
+        ),
+    )
+    save_color_png(overview, path, icc_profile)
 
 
 def package_layers_zip(path: Path, output_dir: Path, included: list[Path]) -> dict[str, object]:

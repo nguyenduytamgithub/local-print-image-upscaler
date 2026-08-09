@@ -1,0 +1,108 @@
+import logging
+from typing import cast
+
+import cv2
+import fsspec
+import numpy as np
+import torch
+from PIL import Image
+from torchvision import transforms
+
+from layerd.matting.birefnet import build_birefnet
+from layerd.models.matting.base import BaseMatting
+
+logger = logging.getLogger(__name__)
+
+
+class BiRefNetMatting(BaseMatting):
+    """BiRefNet wrapper for matting operations following the BaseMatting interface."""
+
+    def __init__(
+        self,
+        hf_card: str = "cyberagent/layerd-birefnet",
+        process_image_size: tuple[int, int] | None = None,
+        device: str = "cpu",
+        weight_path: str | None = None,
+    ) -> None:
+        """Initialize BiRefNet matting model.
+
+        Args:
+            hf_card: HuggingFace model card name (default: cyberagent/layerd-birefnet)
+            process_image_size: Processing resolution as (height, width).
+                If None, uses model's trained size from config.
+            device: Device to run inference on ('cpu' or 'cuda')
+            weight_path: Optional path to custom model weights (.pth file).
+                Supports local paths and remote URLs (gs://, s3://, https://, etc.)
+        """
+        super().__init__()
+        self.model = build_birefnet(hf_card)
+        if weight_path is not None:
+            # Use fsspec for unified I/O (works with local paths and cloud storage)
+            protocol = fsspec.utils.get_protocol(weight_path)
+            remote_protocols = {"gs", "s3", "abfs", "https", "http"}
+            if protocol in remote_protocols:
+                # Cloud storage or remote URL path
+                logger.info(f"Loading weights from {weight_path} via fsspec (protocol={protocol})")
+                with fsspec.open(weight_path, "rb") as f:
+                    state_dict = torch.load(f, map_location="cpu", weights_only=True)
+            else:
+                # Local file path - use standard torch.load for better performance
+                logger.info(f"Loading weights from local path: {weight_path}")
+                state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
+
+            self.model.load_state_dict(state_dict)
+            logger.info(f"Successfully loaded weights from {weight_path}")
+        self.model.to(device)
+        self.model.eval()
+        self.device = device
+
+        # Use model's trained size if available and not overridden
+        if process_image_size is None:
+            if hasattr(self.model, "config") and hasattr(self.model.config, "size"):
+                default_size = cast(int, self.model.config.size)
+                self.process_image_size = (default_size, default_size)
+                logger.info(f"Using model's trained size: {self.process_image_size}, as no size was specified")
+            else:
+                self.process_image_size = (1024, 1024)
+                logger.warning("Could not get model's trained size, using default: (1024, 1024)")
+        else:
+            self.process_image_size = process_image_size
+            # Warn if different from model's trained size
+            if hasattr(self.model, "config") and hasattr(self.model.config, "size"):
+                default_size = cast(int, self.model.config.size)
+                if process_image_size[0] != default_size or process_image_size[1] != default_size:
+                    logger.warning(
+                        f"Using size {process_image_size} which differs from model's trained size ({default_size}, {default_size})"
+                    )
+
+    def infer(self, image: Image.Image | np.ndarray) -> np.ndarray:
+        if isinstance(image, np.ndarray):
+            pil_image = Image.fromarray(image)
+            h, w = image.shape[:2]
+        else:
+            pil_image = image
+            w, h = pil_image.size
+
+        transform = transforms.Compose(
+            [
+                transforms.Resize(self.process_image_size),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),  # ImageNet mean/std
+            ]
+        )
+        input_tensor = transform(pil_image).unsqueeze(0).to(self.device)
+
+        # Prediction
+        with torch.no_grad():
+            preds = self.model(input_tensor)[0][-1].sigmoid().cpu()
+
+        pred = preds[0].squeeze()
+        pred = cv2.resize(pred.numpy(), (w, h), interpolation=cv2.INTER_LINEAR)
+
+        return pred.astype(np.float64)
+
+    def to(self, device: str) -> "BiRefNetMatting":
+        """Move model to specified device (e.g., 'cpu' or 'cuda')."""
+        self.model.to(device)
+        self.device = device
+        return self

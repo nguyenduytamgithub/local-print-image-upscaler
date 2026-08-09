@@ -33,12 +33,18 @@ checkpoints. Their copyrights and licenses remain with their respective authors.
 | SAM 2.1 | <https://github.com/facebookresearch/sam2> | Apache-2.0 |
 | Grounding DINO | <https://github.com/IDEA-Research/GroundingDINO> | Apache-2.0 |
 | ViTMatte | <https://github.com/hustvl/ViTMatte> | MIT; checkpoint/model-card terms also apply |
+| LayerD source | <https://github.com/CyberAgentAILab/LayerD> | Apache-2.0; vendored `LICENSE` and `NOTICE` retained |
+| cr-renderer bundled by LayerD | <https://github.com/CyberAgentAILab/cr-renderer> | Apache-2.0 per retained LayerD notice |
 | LaMa | <https://github.com/advimman/lama> | Apache-2.0 |
 | simple-lama-inpainting adapter | <https://github.com/enesmsahin/simple-lama-inpainting> | Apache-2.0 |
 | Tesseract OCR | <https://github.com/tesseract-ocr/tesseract> | Apache-2.0 |
 | UB Mannheim Windows build of Tesseract | <https://tesseract-ocr.github.io/tessdoc/Installation.html> | Tesseract distribution; component notices remain applicable |
 | Tesseract `tessdata_best` Vietnamese model | <https://github.com/tesseract-ocr/tessdata_best> | Apache-2.0 |
 | Transformers | <https://github.com/huggingface/transformers> | Apache-2.0 |
+| timm | <https://github.com/huggingface/pytorch-image-models> | Apache-2.0 |
+| Kornia | <https://github.com/kornia/kornia> | Apache-2.0 |
+| Kornia-rs | <https://github.com/kornia/kornia-rs> | Apache-2.0 |
+| BiRefNet HR/LayerD model artifacts | <https://huggingface.co/ZhengPeng7/BiRefNet_HR-matting>, <https://huggingface.co/cyberagent/layerd-birefnet> | Upstream model-card/artifact terms; no license inferred from a source repository |
 | `nrl-ai/vn-spell-correction-base` | <https://huggingface.co/nrl-ai/vn-spell-correction-base> | Apache-2.0 as declared by the upstream model card |
 | psd-tools | <https://github.com/psd-tools/psd-tools> | MIT |
 | OpenRaster | <https://www.openraster.org/> | Open specification; implementations retain their own licenses |
@@ -47,8 +53,10 @@ Retained license texts and source/license records for the local engines are unde
 
 - `APP/engines/V2/THIRD_PARTY_LICENSES/`
 - `APP/engines/V3/THIRD_PARTY_LICENSES/`
-- `APP/engines/V5/SOURCES.md` records pinned SAM 2.1/Grounding DINO revisions, ViTMatte-S,
-  LaMa and Vietnamese OCR hashes, plus the PSD/OpenRaster format policy.
+- `APP/engines/V5/SOURCES.md` records pinned SAM 2.1/Grounding DINO/BiRefNet/LayerD revisions,
+  ViTMatte compatibility, LaMa and Vietnamese OCR hashes, plus review and PSD/OpenRaster policy.
+- `APP/engines/V5/vendor/LayerD/LICENSE`, `NOTICE` and `VENDOR.md` retain LayerD attribution,
+  upstream commit `21aef937a0371614adb4d961f52d02409cb8ecc7` and local compatibility notes.
 - `APP/engines/V7/SOURCES.md` records the PP-OCRv6 sources, Unicode/OpenType references and
   the exact Vietnamese proposal-model revision; `MODEL_SHA256SUMS.txt` records downloaded assets.
 
@@ -64,6 +72,14 @@ include the exact license and notices required by the corresponding upstream pac
 Pretrained checkpoint terms can differ from the repository code license. Public packaging
 should download checkpoints from official release pages, record SHA-256 hashes, and avoid
 re-hosting a checkpoint unless redistribution permission has been verified.
+
+V5 Pro vendors the Apache-2.0 LayerD source and downloads the separate
+`cyberagent/layerd-birefnet` model at revision
+`679f743cd001fb5d6360e59e8e1904678c5fa734`. The source license is not treated as proof that
+every model/training asset has identical redistribution terms. LayerD is used only as a proposal
+backend; this usage policy does not change its license or the terms of its model dependencies.
+The independently downloaded `ZhengPeng7/BiRefNet_HR-matting` snapshot is likewise pinned by
+revision/hash, while its model-card/artifact terms remain upstream.
 
 V4 Deep Print reuses the local V3 model set and runs the HAT sharper checkpoint in its
 second restoration pass. The Apache-2.0 license listed for the HAT source repository does

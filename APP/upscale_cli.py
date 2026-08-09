@@ -11,6 +11,7 @@ import msvcrt
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -58,7 +59,8 @@ V2_ENGINE = APP_DIR / "engines" / "V2" / "upsize_ai_v2.py"
 V3_ENGINE = APP_DIR / "engines" / "V3" / "upsize_ai_v3_master.py"
 V4_ENGINE = APP_DIR / "engines" / "V4" / "upsize_vector_v4.py"
 V4_DEEP_ENGINE = APP_DIR / "engines" / "V4" / "deep_raster_v4.py"
-V5_ENGINE = APP_DIR / "engines" / "V5" / "layer_engine_v5.py"
+V5_ENGINE = APP_DIR / "engines" / "V5" / "layer_engine_v5_pro.py"
+V5_ENGINE_DIR = V5_ENGINE.parent
 V7_ENGINE = APP_DIR / "engines" / "V7" / "design_repair_v7.py"
 V7_ENGINE_DIR = V7_ENGINE.parent
 V7_MODELS = APP_DIR / "engines" / "V7" / "models"
@@ -78,6 +80,11 @@ V3_ENGINE_FILES = (
     APP_DIR / "engines" / "V3" / "src" / "blend_outputs.py",
 )
 VERSION_FILE = ROOT_DIR / "VERSION"
+V5_REVIEW_SCHEMA = "V5_LAYER_REVIEW_V2"
+V5_REVIEW_RESUME_SIGNATURE = "V5_PRO_INVENTORY_2026_08_09_K"
+MAX_REVIEW_ROUTING_BYTES = 64 * 1024 * 1024
+V5_FAILURE_DIAGNOSTIC_MAX_FILE_BYTES = 64 * 1024 * 1024
+V5_FAILURE_DIAGNOSTIC_MAX_TOTAL_BYTES = 128 * 1024 * 1024
 
 # V7 remains executable as a standalone script and therefore its internal
 # modules use top-level imports (``v7lib``).  Put only that engine directory on
@@ -154,8 +161,9 @@ UPSCALE ẢNH GPU
 5. Dùng V4 toàn vector cho logo/đồ họa phẳng (có thể posterize ảnh chụp):
    .\\upscale vector <ten-anh> <n> [--width-mm <khổ-rộng-mm>]
 
-6. Dùng V5 tách ảnh phẳng thành các layer raster thông minh:
-   .\\upscale layers <file-hoặc-thư-mục> <n> [--max-layers 4..60]
+6. Dùng V5 Pro tách ảnh phẳng thành layer có kiểm kê và duyệt trực quan:
+   .\\upscale layers <file-hoặc-thư-mục> <n> [--detail exhaustive|grouped]
+                   [--review gui|defer|auto|strict]
                    [--inpaint auto|poster|lama] [--no-semantic] [--allow-huge]
 
 7. Dùng V7 làm rõ toàn ảnh và phục dựng chữ hỏng/mờ/sai, có bước duyệt nội dung:
@@ -165,9 +173,9 @@ UPSCALE ẢNH GPU
                    [--ocr-passes 1..3] [--no-language-model]
                    [--inpaint auto|poster|opencv|strict] [--allow-huge]
 
-8. Mở giao diện duyệt chữ V7 trong Chrome, không cần sửa JSON bằng tay:
-   .\\upscale review <bundle-hoặc-TEXT_REVIEW.json>
-   .\\upscale duyet  <bundle-hoặc-TEXT_REVIEW.json>
+8. Mở giao diện duyệt V5 hoặc V7 trong Chrome, không cần sửa JSON bằng tay:
+   .\\upscale review <bundle-hoặc-file-duyệt.json>
+   .\\upscale duyet  <bundle-hoặc-file-duyệt.json>
 
 Đường dẫn là thư mục thì chương trình chạy tất cả ảnh trong thư mục và
 các thư mục con với cùng một hệ số n.
@@ -186,6 +194,7 @@ Ví dụ:
    .\\upscale repair poster.png 4 --review defer
    .\\upscale repair poster.png 4 --review-file "D:\\TEXT_REVIEW.json"
    .\\upscale repair poster.png 4 --review strict --review-file "D:\\TEXT_REVIEW.json"
+   .\\upscale review "D:\\OUTPUT\\V5_LAYERS\\poster_V5_LAYERS_x1"
    .\\upscale review "D:\\OUTPUT\\V7_REPAIR\\poster_V7_REPAIR_x4"
 
 Kết quả V2: {OUTPUT_DIR / 'V2_FAST'}
@@ -244,6 +253,7 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
         "bleed_mm": 0.0,
         "profile_name": "ISO Coated v2 300% (basICColor)",
         "max_layers": 24,
+        "detail": "exhaustive",
         "inpaint": "auto",
         "semantic": True,
         "review": "gui",
@@ -255,6 +265,7 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
     v5_specific_option = False
     v5_v7_specific_option = False
     v7_specific_option = False
+    v5_v7_review_option = False
     index = 0
     while index < len(argv):
         value = argv[index]
@@ -275,6 +286,7 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
                 if raw.lower() not in {"gui", "defer", "auto", "strict"}:
                     raise UserError("--review chỉ nhận gui, defer, auto hoặc strict.")
                 v4_options["review"] = raw.lower()
+                v5_v7_review_option = True
             elif lowered == "--review-file":
                 if not raw.strip():
                     raise UserError("--review-file không được để trống.")
@@ -287,7 +299,17 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
                 if not 1 <= number <= 3:
                     raise UserError("--ocr-passes phải từ 1 đến 3.")
                 v4_options["ocr_passes"] = number
-            v7_specific_option = True
+            if lowered != "--review":
+                v7_specific_option = True
+            index += 1
+        elif lowered == "--detail":
+            if index + 1 >= len(argv):
+                raise UserError(f"Thiếu giá trị sau {value}.")
+            raw = argv[index + 1].lower()
+            if raw not in {"exhaustive", "grouped"}:
+                raise UserError("--detail chỉ nhận exhaustive hoặc grouped.")
+            v4_options["detail"] = raw
+            v5_specific_option = True
             index += 1
         elif lowered == "--max-layers":
             if index + 1 >= len(argv):
@@ -355,13 +377,15 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
     if mode not in {"V4_PRINT", "V4_VECTOR"} and v4_specific_option:
         raise UserError("--width-mm, --bleed-mm và --profile-name chỉ dùng với chế độ print/V4.")
     if mode != "V5_LAYERS" and v5_specific_option:
-        raise UserError("--max-layers và --no-semantic chỉ dùng với chế độ layers/V5.")
+        raise UserError("--detail, --max-layers và --no-semantic chỉ dùng với chế độ layers/V5.")
     if mode not in {"V5_LAYERS", "V7_REPAIR"} and v5_v7_specific_option:
         raise UserError("--inpaint chỉ dùng với chế độ layers/V5 hoặc repair/V7.")
     if mode != "V7_REPAIR" and v7_specific_option:
         raise UserError(
             "--review, --review-file, --ocr-passes và --no-language-model chỉ dùng với repair/V7."
         )
+    if mode not in {"V5_LAYERS", "V7_REPAIR"} and v5_v7_review_option:
+        raise UserError("--review chỉ dùng với layers/V5 hoặc repair/V7.")
     if mode == "V5_LAYERS" and v4_options["inpaint"] not in {"auto", "poster", "lama"}:
         raise UserError("V5 --inpaint chỉ nhận auto, poster hoặc lama.")
     if mode == "V7_REPAIR" and v4_options["inpaint"] not in {
@@ -379,6 +403,11 @@ def parse_command(argv: list[str]) -> tuple[str, str, float, bool, dict[str, obj
         scale = float(scale_token.replace(",", "."))
     except ValueError as exc:
         raise UserError(f"Hệ số không hợp lệ: {scale_token}") from exc
+    if mode == "V5_LAYERS" and not scale.is_integer():
+        raise UserError(
+            "V5 layers requires an integer scale x1..x20 for stable editable masks; "
+            "separate at x1, then upscale the edited composite for fractional sizing."
+        )
     minimum_scale = 1.0 if mode in {"V5_LAYERS", "V7_REPAIR"} else MIN_SCALE
     if mode == "V7_REPAIR" and 1.0 < scale < 2.0:
         raise UserError("V7 chỉ nhận đúng x1 hoặc từ x2 đến x20; không nhận hệ số nằm giữa.")
@@ -532,6 +561,243 @@ def open_review_browser(url: str) -> bool:
     if not opened:
         print(f"Không tự mở được trình duyệt. Hãy mở liên kết cục bộ này: {url}")
     return opened
+
+
+def _read_review_schema(path: Path) -> str | None:
+    """Read only enough JSON to route a review file; model code is never loaded."""
+
+    try:
+        resolved = path.resolve(strict=True)
+        stat = resolved.stat()
+    except OSError:
+        return None
+    if (
+        not resolved.is_file()
+        or resolved.suffix.casefold() != ".json"
+        or stat.st_size > MAX_REVIEW_ROUTING_BYTES
+    ):
+        return None
+    try:
+        document = json.loads(resolved.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    schema = document.get("schema")
+    return schema if isinstance(schema, str) else None
+
+
+def _v5_bundle_root(checkpoint: Path) -> Path:
+    parent = checkpoint.parent
+    return parent.parent if parent.name.casefold() == TECHNICAL_DIR_NAME.casefold() else parent
+
+
+def _read_v5_review_manifest(checkpoint: Path) -> dict[str, object] | None:
+    """Read optional V5 metadata and reject a contradictory bundle manifest."""
+
+    bundle = _v5_bundle_root(checkpoint)
+    manifest_candidates = (
+        bundle / "manifest.json",
+        bundle / TECHNICAL_DIR_NAME / "PORTABLE_MANIFEST.json",
+    )
+    metadata: dict[str, object] | None = None
+    for manifest_path in manifest_candidates:
+        if not manifest_path.is_file():
+            continue
+        metadata = _read_bundle_manifest(manifest_path)
+        if metadata is None:
+            raise UserError(f"Manifest V5 bị hỏng hoặc không đọc được: {manifest_path}")
+        if metadata.get("pipeline") != "V5_SMART_EDITABLE_LAYERS":
+            raise UserError(
+                "Checkpoint mang schema V5 nhưng manifest cùng bundle không phải V5 SMART EDITABLE LAYERS."
+            )
+        declared = metadata.get("review_checkpoint")
+        if isinstance(declared, str) and declared.strip():
+            relative = Path(declared.replace("/", os.sep))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise UserError("Manifest V5 chứa đường dẫn checkpoint không an toàn.")
+            try:
+                declared_path = (bundle / relative).resolve(strict=True)
+            except OSError as exc:
+                raise UserError("Manifest V5 chỉ tới checkpoint không tồn tại.") from exc
+            if declared_path != checkpoint:
+                raise UserError(
+                    "File đã chọn không phải LAYER_REVIEW.json được manifest V5 chỉ định."
+                )
+        break
+    return metadata
+
+
+def resolve_v5_review_target(
+    raw_target: str | os.PathLike[str],
+) -> tuple[Path, dict[str, object] | None] | None:
+    """Resolve a V5 checkpoint from an output bundle, _KY_THUAT, or JSON path."""
+
+    supplied = Path(raw_target).expanduser()
+    if supplied.is_symlink():
+        raise UserError(f"Không mở review qua symbolic link: {supplied}")
+    try:
+        resolved = supplied.resolve(strict=True)
+    except OSError:
+        return None
+
+    if resolved.is_file():
+        candidates = [resolved]
+    elif resolved.is_dir():
+        candidates = []
+        if resolved.name.casefold() == TECHNICAL_DIR_NAME.casefold():
+            candidates.append(resolved / "LAYER_REVIEW.json")
+        candidates.extend(
+            [
+                resolved / TECHNICAL_DIR_NAME / "LAYER_REVIEW.json",
+                resolved / "LAYER_REVIEW.json",
+            ]
+        )
+    else:
+        return None
+
+    unique_candidates: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        identity = os.path.normcase(str(candidate))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if not candidate.is_file():
+            continue
+        if candidate.is_symlink() or candidate.parent.is_symlink():
+            raise UserError(f"Không mở checkpoint V5 qua symbolic link: {candidate}")
+        unique_candidates.append(candidate.resolve(strict=True))
+
+    matches = [
+        candidate
+        for candidate in unique_candidates
+        if _read_review_schema(candidate) == V5_REVIEW_SCHEMA
+    ]
+    if len(matches) > 1:
+        raise UserError(
+            "Đường dẫn chứa nhiều checkpoint V5; hãy chỉ rõ đúng file _KY_THUAT\\LAYER_REVIEW.json."
+        )
+    if not matches:
+        # A bundle that explicitly identifies itself as V5 must not silently
+        # fall through to V7 when its checkpoint is damaged or missing.
+        if resolved.is_file():
+            bundle = _v5_bundle_root(resolved)
+        else:
+            bundle = (
+                resolved.parent
+                if resolved.name.casefold() == TECHNICAL_DIR_NAME.casefold()
+                else resolved
+            )
+        if bundle.is_dir():
+            manifest_path = bundle / "manifest.json"
+            metadata = _read_bundle_manifest(manifest_path) if manifest_path.is_file() else None
+            if metadata is not None and metadata.get("pipeline") == "V5_SMART_EDITABLE_LAYERS":
+                raise UserError(
+                    "Bundle V5 thiếu LAYER_REVIEW.json hợp lệ (schema V5_LAYER_REVIEW_V2)."
+                )
+        return None
+
+    checkpoint = matches[0]
+    metadata = _read_v5_review_manifest(checkpoint)
+    return checkpoint, metadata
+
+
+def _run_v5_review_ui(review_path: Path) -> dict[str, object]:
+    if str(V5_ENGINE_DIR) not in sys.path:
+        sys.path.insert(0, str(V5_ENGINE_DIR))
+    try:
+        from v5pro.review_server import ReviewUIError, run_review_ui
+    except ImportError as exc:
+        raise UserError(
+            "Thiếu thành phần giao diện duyệt V5; hãy kiểm tra APP\\engines\\V5\\v5pro."
+        ) from exc
+    try:
+        return run_review_ui(review_path, open_browser=open_review_browser)
+    except ReviewUIError as exc:
+        raise UserError(f"Không mở được giao diện duyệt layer V5: {exc}") from exc
+
+
+def _v5_rerun_command(metadata: dict[str, object] | None) -> str | None:
+    if metadata is None:
+        return None
+    source = metadata.get("original_source")
+    raw_scale = metadata.get("scale")
+    if not isinstance(source, str) or not source.strip() or "\x00" in source:
+        return None
+    if isinstance(raw_scale, bool):
+        return None
+    try:
+        scale = float(raw_scale)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(scale) or not (scale == 1.0 or 2.0 <= scale <= MAX_SCALE):
+        return None
+    # This is printed for copy/paste into PowerShell. Refuse values that can
+    # interpolate or break out of the quoted source argument.
+    unsafe_characters = '&|<>^%!"$' + chr(96) + "\r\n"
+    if any(character in source for character in unsafe_characters):
+        return None
+
+    arguments = [".\\upscale", "layers", f'"{source}"', f"{scale:g}"]
+    launcher_options = metadata.get("launcher_options")
+    options = launcher_options if isinstance(launcher_options, dict) else {}
+    detail = str(options.get("detail", metadata.get("detail", "exhaustive")))
+    if detail in {"exhaustive", "grouped"}:
+        arguments.extend(["--detail", detail])
+    arguments.extend(["--review", "gui"])
+    inpaint = str(options.get("inpaint", "auto"))
+    if inpaint in {"auto", "poster", "lama"}:
+        arguments.extend(["--inpaint", inpaint])
+    if options.get("semantic") is False:
+        arguments.append("--no-semantic")
+    if options.get("allow_huge") is True:
+        arguments.append("--allow-huge")
+    return " ".join(arguments)
+
+
+def _run_resolved_v5_review(
+    review_path: Path,
+    metadata: dict[str, object] | None,
+) -> int:
+    print("\nDUYỆT LAYER V5")
+    print(f"  File quyết định : {review_path}")
+    print("  Trình duyệt     : ưu tiên Google Chrome")
+    print("  Cách lưu        : mỗi thao tác được ghi ngay, không cần sửa JSON")
+    _run_v5_review_ui(review_path)
+
+    print("\nĐÃ LƯU CHECKPOINT V5 — PSD/ORA HIỆN TẠI CHƯA THAY ĐỔI")
+    print("  Muốn tạo lại bộ layer theo lần duyệt, bắt buộc chạy lại lệnh layers.")
+    rerun = _v5_rerun_command(metadata)
+    if rerun is not None:
+        print("  Lệnh chạy lại an toàn cho đúng ảnh và hệ số:")
+        print(f"  {rerun}")
+    else:
+        print("  Không đủ metadata an toàn để tự in lệnh; hãy chạy lại lệnh layers ban đầu với --review gui.")
+    print(
+        "  Lưu ý trung thực: checkpoint đã lưu sẽ chỉ được áp dụng khi lệnh layers chạy lại "
+        "và xác minh nó còn khớp ảnh/kiểm kê; không có bước nào tự sửa PSD/ORA cũ."
+    )
+    return 0
+
+
+def run_v5_review_command(raw_target: str | os.PathLike[str]) -> int:
+    resolved = resolve_v5_review_target(raw_target)
+    if resolved is None:
+        raise UserError("Đường dẫn không phải checkpoint/bundle V5_LAYER_REVIEW_V2.")
+    return _run_resolved_v5_review(*resolved)
+
+
+def run_review_command(raw_target: str | os.PathLike[str]) -> int:
+    """Auto-route V5 layer checkpoints while retaining the V7 review flow."""
+
+    supplied = Path(raw_target).expanduser()
+    if not supplied.exists():
+        raise UserError(f"Không tìm thấy bundle hoặc file duyệt V5/V7: {supplied}")
+    resolved_v5 = resolve_v5_review_target(raw_target)
+    if resolved_v5 is not None:
+        return _run_resolved_v5_review(*resolved_v5)
+    return run_v7_review_command(raw_target)
 
 
 def _validated_review_bundle(
@@ -1047,9 +1313,10 @@ def validate_v5_resource_plan(
     *,
     allow_huge: bool,
     max_layers: int = 24,
-) -> dict[str, float]:
-    if not 4 <= max_layers <= 60:
-        raise UserError("Ngân sách layer V5 phải từ 4 đến 60.")
+) -> dict[str, float | str]:
+    # ``max_layers`` is retained only for callers from older releases. V5 Pro
+    # streams tight crops and never drops an element to satisfy a layer cap.
+    _legacy_max_layers = max_layers
     source_pixels = source_size[0] * source_size[1]
     output_pixels = final_size[0] * final_size[1]
     source_mp = source_pixels / 1_000_000
@@ -1060,18 +1327,18 @@ def validate_v5_resource_plan(
             f"({source_mp:.1f} MP nguồn, {output_mp:.1f} MP canvas; "
             f"tối đa {V5_HARD_OUTPUT_MEGAPIXELS:g} MP đầu ra)."
         )
-    # Worst-case foreground layers may each cover most of the canvas. Include
-    # cropped RGBA+mask residency, model/SAM working memory, the open ORA, the
-    # portable PNG/mask ZIP and atomic replacement headroom. This estimate is
-    # intentionally conservative; a post-render gate uses the actual crop area.
+    # V5 Pro runs DINO, SAM2, BiRefNet and LayerD sequentially and exports one
+    # tight crop at a time. Peak memory therefore depends mainly on canvas and
+    # the largest model, not an artificial number of full-canvas layer masks.
     estimated_peak_ram = (
-        source_pixels * 420
-        + output_pixels * (32 + 5 * max_layers)
-        + 3 * 1024**3
+        source_pixels * 620
+        + output_pixels * 46
+        + 5 * 1024**3
     )
     estimated_disk = (
-        output_pixels * (12 + 14 * max_layers)
-        + 2 * 1024**3
+        source_pixels * 180
+        + output_pixels * 70
+        + 3 * 1024**3
     )
     minimum_disk_before_segmentation = output_pixels * 20 + 2 * 1024**3
     if output_mp > V5_SOFT_OUTPUT_MEGAPIXELS and not allow_huge:
@@ -1093,9 +1360,8 @@ def validate_v5_resource_plan(
     free_ram = available_physical_memory()
     if free_ram is not None and estimated_peak_ram > free_ram * 0.85:
         raise UserError(
-            f"Không đủ RAM khả dụng cho V5: ước tính {estimated_peak_ram / 1024**3:.2f} GiB "
-            f"với tối đa {max_layers} layer tiền cảnh, hiện khả dụng {free_ram / 1024**3:.2f} GiB. "
-            "Hãy giảm n hoặc --max-layers."
+            f"Không đủ RAM khả dụng cho V5 Pro: ước tính {estimated_peak_ram / 1024**3:.2f} GiB, "
+            f"hiện khả dụng {free_ram / 1024**3:.2f} GiB. Hãy giảm n."
         )
     return {
         "source_megapixels": round(source_mp, 3),
@@ -1103,6 +1369,8 @@ def validate_v5_resource_plan(
         "estimated_peak_ram_gib": round(estimated_peak_ram / 1024**3, 2),
         "estimated_working_disk_gib": round(estimated_disk / 1024**3, 2),
         "minimum_working_disk_gib": round(minimum_disk_before_segmentation / 1024**3, 2),
+        "layer_policy": "exhaustive tight-crop streaming; no hard layer cap",
+        "legacy_max_layers_ignored": float(_legacy_max_layers),
     }
 
 
@@ -1658,6 +1926,119 @@ def atomic_install_directory(source: Path, target: Path) -> None:
     journal.unlink(missing_ok=True)
 
 
+def _is_link_or_reparse_point(path: Path) -> bool:
+    """Return True for symlinks and Windows junction/other reparse entries."""
+
+    metadata = path.lstat()
+    attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def _assert_no_reparse_points_below(root: Path) -> None:
+    """Refuse recursive deletion when any entry could redirect outside ``root``."""
+
+    if _is_link_or_reparse_point(root):
+        raise RuntimeError(f"Refusing to remove V5 staging link/reparse point: {root}")
+
+    def fail_closed(error: OSError) -> None:
+        raise RuntimeError(
+            f"Cannot fully validate V5 staging before cleanup: {error.filename or root}"
+        ) from error
+
+    for current_raw, directory_names, file_names in os.walk(
+        root,
+        topdown=True,
+        onerror=fail_closed,
+        followlinks=False,
+    ):
+        current = Path(current_raw)
+        for name in (*directory_names, *file_names):
+            candidate = current / name
+            try:
+                redirected = _is_link_or_reparse_point(candidate)
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"V5 staging changed while it was being validated: {candidate}"
+                ) from exc
+            if redirected:
+                raise RuntimeError(
+                    f"Refusing to remove V5 staging containing link/reparse point: {candidate}"
+                )
+
+
+def cleanup_stale_v5_output_staging(
+    target: Path,
+    *,
+    active_staging: Path | None = None,
+) -> list[Path]:
+    """Remove only abandoned launcher staging directories for one V5 target.
+
+    The public launcher calls this while holding ``gpu_job_lock`` and before the
+    new staging directory exists.  ``active_staging`` is still excluded so this
+    helper remains fail-safe if its lifecycle is changed later.
+    """
+
+    declared_target = Path(target).expanduser()
+    declared_parent = Path(os.path.abspath(declared_target.parent))
+    try:
+        parent = declared_target.parent.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot validate the V5 output parent before staging cleanup: {declared_target.parent}"
+        ) from exc
+    if os.path.normcase(str(declared_parent)) != os.path.normcase(str(parent)):
+        raise RuntimeError(
+            f"Refusing V5 staging cleanup through a redirected output parent: {declared_target.parent}"
+        )
+    if not parent.is_dir() or _is_link_or_reparse_point(parent):
+        raise RuntimeError(f"Unsafe V5 output parent for staging cleanup: {parent}")
+
+    pattern = re.compile(
+        rf"\.{re.escape(declared_target.name)}\.new-[0-9a-f]{{32}}",
+        flags=re.ASCII,
+    )
+    active_name: str | None = None
+    if active_staging is not None:
+        active = Path(active_staging)
+        active_parent = Path(os.path.abspath(active.parent))
+        if (
+            os.path.normcase(str(active_parent)) != os.path.normcase(str(parent))
+            or pattern.fullmatch(active.name) is None
+        ):
+            raise RuntimeError("Active V5 staging path is outside the target namespace.")
+        active_name = os.path.normcase(active.name)
+
+    removed: list[Path] = []
+    for candidate in parent.iterdir():
+        if pattern.fullmatch(candidate.name) is None:
+            continue
+        if active_name is not None and os.path.normcase(candidate.name) == active_name:
+            continue
+        try:
+            if _is_link_or_reparse_point(candidate):
+                raise RuntimeError(
+                    f"Refusing to remove V5 staging link/reparse point: {candidate}"
+                )
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError:
+            # Another filesystem actor removed it after enumeration.  The GPU
+            # lock prevents another launcher job, so there is nothing to clean.
+            continue
+        if (
+            resolved.parent != parent
+            or resolved.name != candidate.name
+            or not resolved.is_dir()
+        ):
+            raise RuntimeError(f"Unsafe V5 staging candidate: {candidate}")
+        _assert_no_reparse_points_below(resolved)
+        if _is_link_or_reparse_point(resolved):
+            raise RuntimeError(f"V5 staging changed before cleanup: {resolved}")
+        shutil.rmtree(resolved)
+        removed.append(resolved)
+    return removed
+
+
 @contextlib.contextmanager
 def gpu_job_lock():
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -1896,6 +2277,202 @@ def run_v4_job(
     return target_dir
 
 
+def _build_v5_engine_command(
+    *,
+    staged_input: Path,
+    scale: float,
+    staging_bundle: Path,
+    master: Path,
+    result_stem: str,
+    options: dict[str, object],
+    prior_review_file: Path | None,
+) -> list[str]:
+    command = [
+        str(PYTHON_V5),
+        "-B",
+        str(V5_ENGINE),
+        str(staged_input),
+        f"{scale:g}",
+        str(staging_bundle),
+        "--master",
+        str(master),
+        "--name",
+        result_stem,
+        "--detail",
+        str(options.get("detail", "exhaustive")),
+        "--review-mode",
+        str(options.get("review", "gui")),
+        "--inpaint",
+        str(options.get("inpaint", "auto")),
+        "--app-version",
+        APP_VERSION,
+    ]
+    if not bool(options.get("semantic", True)):
+        command.append("--no-semantic")
+    if prior_review_file is not None:
+        command.extend(["--review-file", str(prior_review_file)])
+    return command
+
+
+def _v5_resume_metadata_matches(
+    metadata: dict[str, object] | None,
+    source: Path,
+    scale: float,
+) -> bool:
+    """Reject legacy/incompatible checkpoints before launching costly V5 inference."""
+
+    if not metadata:
+        return False
+    if metadata.get("engine_generation") != "V5_PRO_EXHAUSTIVE_V2":
+        return False
+    if metadata.get("review_resume_signature") != V5_REVIEW_RESUME_SIGNATURE:
+        return False
+    raw_scale = metadata.get("scale")
+    if isinstance(raw_scale, bool):
+        return False
+    try:
+        if not math.isclose(float(raw_scale), float(scale), rel_tol=0.0, abs_tol=1e-9):
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return bool(
+        _same_canonical_path(metadata.get("original_source"), source)
+        and metadata.get("original_source_sha256") == sha256_file(source)
+    )
+
+
+def _validate_v5_publish_manifest(
+    metadata: dict[str, object],
+    final_size: tuple[int, int],
+) -> None:
+    """Allow review-needed bundles, but never atomically publish a hard FAIL."""
+
+    if metadata.get("pipeline") != "V5_SMART_EDITABLE_LAYERS":
+        raise RuntimeError("Manifest V5 has the wrong pipeline.")
+    if metadata.get("final_size") != list(final_size):
+        raise RuntimeError("Manifest V5 has the wrong final canvas size.")
+    grouping = metadata.get("grouping")
+    selected = (
+        int(grouping.get("selected_layer_count", 0))
+        if isinstance(grouping, dict)
+        else 0
+    )
+    if selected < 1:
+        raise RuntimeError("V5 produced no valid foreground/editable layer.")
+    qa_status = str(metadata.get("qa_status") or "")
+    if qa_status == "FAIL":
+        raise RuntimeError(
+            "V5 hard QA failed; staging will not replace the last good output."
+        )
+    if qa_status not in {"PASS", "REVIEW_REQUIRED"}:
+        raise RuntimeError(f"V5 manifest has an invalid QA status: {qa_status or 'missing'}")
+
+
+def _v5_failure_diagnostic_target(result_stem: str) -> Path:
+    safe_stem = re.sub(r"[\x00-\x1f]+", "_", safe_folder_name(result_stem))
+    safe_stem = safe_stem.strip(" ._")[:80] or "image"
+    work_root = WORK_DIR.resolve()
+    target = (work_root / f"v5_last_failure_{safe_stem}").resolve()
+    if target.parent != work_root or target.name != f"v5_last_failure_{safe_stem}":
+        raise RuntimeError("Unsafe V5 failure diagnostic target.")
+    return target
+
+
+def _preserve_v5_failure_diagnostics(
+    staging_bundle: Path,
+    result_stem: str,
+) -> Path | None:
+    """Atomically retain only small QA evidence from a hard-failed V5 run."""
+
+    staging = staging_bundle.resolve()
+    manifest_source = staging / "manifest.json"
+    if not staging.is_dir() or not manifest_source.is_file():
+        return None
+    if manifest_source.stat().st_size > V5_FAILURE_DIAGNOSTIC_MAX_FILE_BYTES:
+        raise RuntimeError("Required V5 diagnostic exceeds the per-file safety cap: manifest.json")
+    try:
+        manifest = json.loads(manifest_source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict) or str(manifest.get("qa_status") or "") != "FAIL":
+        return None
+
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    work_root = WORK_DIR.resolve()
+    target = _v5_failure_diagnostic_target(result_stem)
+    if target.exists() and not target.is_dir():
+        raise RuntimeError(f"Unsafe non-directory V5 diagnostic target: {target}")
+    temporary = work_root / f".{target.name}.new-{uuid.uuid4().hex}"
+    if temporary.parent.resolve() != work_root or not re.fullmatch(
+        rf"\.{re.escape(target.name)}\.new-[0-9a-f]{{32}}",
+        temporary.name,
+    ):
+        raise RuntimeError("Unsafe V5 diagnostic staging path.")
+    required_relatives = (
+        Path("manifest.json"),
+        Path(TECHNICAL_DIR_NAME) / "QA_REPORT.json",
+        Path(TECHNICAL_DIR_NAME) / "QA_REPORT.html",
+    )
+    optional_relatives = (
+        Path(TECHNICAL_DIR_NAME) / "RECOMPOSITION_DIFF_X8.png",
+        Path(TECHNICAL_DIR_NAME) / "LAYER_REVIEW.json",
+        Path(TECHNICAL_DIR_NAME) / "SOURCE_FOR_REVIEW.png",
+        Path(TECHNICAL_DIR_NAME) / "BACKGROUND_FOR_OCR_QA.png",
+    )
+    copied = 0
+    copied_bytes = 0
+    try:
+        temporary.mkdir(parents=False, exist_ok=False)
+        for relative in (*required_relatives, *optional_relatives):
+            source = staging / relative
+            if not source.is_file():
+                continue
+            size = source.stat().st_size
+            required = relative in required_relatives
+            if size > V5_FAILURE_DIAGNOSTIC_MAX_FILE_BYTES:
+                if required:
+                    raise RuntimeError(
+                        f"Required V5 diagnostic exceeds the per-file safety cap: {relative}"
+                    )
+                continue
+            if copied_bytes + size > V5_FAILURE_DIAGNOSTIC_MAX_TOTAL_BYTES:
+                if required:
+                    raise RuntimeError(
+                        f"Required V5 diagnostics exceed the total safety cap at: {relative}"
+                    )
+                continue
+            destination = temporary / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            actual_size = destination.stat().st_size
+            if actual_size > V5_FAILURE_DIAGNOSTIC_MAX_FILE_BYTES:
+                destination.unlink(missing_ok=True)
+                if required:
+                    raise RuntimeError(
+                        f"Required V5 diagnostic grew beyond the safety cap: {relative}"
+                    )
+                continue
+            if copied_bytes + actual_size > V5_FAILURE_DIAGNOSTIC_MAX_TOTAL_BYTES:
+                destination.unlink(missing_ok=True)
+                if required:
+                    raise RuntimeError(
+                        f"Required V5 diagnostics grew beyond the total safety cap at: {relative}"
+                    )
+                continue
+            copied_bytes += actual_size
+            copied += 1
+        if not copied:
+            return None
+        atomic_install_directory(temporary, target)
+        return target
+    finally:
+        if temporary.exists():
+            resolved_temporary = temporary.resolve()
+            if resolved_temporary.parent != work_root:
+                raise RuntimeError("Refusing to remove unsafe V5 diagnostic staging path.")
+            shutil.rmtree(resolved_temporary)
+
+
 def run_v5_job(
     source: Path,
     scale: float,
@@ -1914,12 +2491,11 @@ def run_v5_job(
         raise UserError(f"Thiếu engine V5: {V5_ENGINE}")
     source_size, source_mode, icc_profile = inspect_image(source)
     final_size = tuple(int(round(value * scale)) for value in source_size)
-    max_layers = int(options.get("max_layers", 24))
     resource_plan = validate_v5_resource_plan(
         source_size,
         final_size,
         allow_huge=allow_huge,
-        max_layers=max_layers,
+        max_layers=int(options.get("max_layers", 24)),
     )
     relative_dir = output_subdir or Path()
     result_stem = output_stem or source.stem
@@ -1932,13 +2508,36 @@ def run_v5_job(
         / relative_dir
         / f"{result_stem}_V5_LAYERS_x{tag}.json"
     )
+    prior_review_file: Path | None = None
+    if target_dir.is_dir():
+        try:
+            prior = resolve_v5_review_target(target_dir)
+        except UserError as exc:
+            print(
+                f"CẢNH BÁO: không tái sử dụng checkpoint V5 cũ vì bundle không hợp lệ: {exc}",
+                file=sys.stderr,
+            )
+        else:
+            if prior is not None:
+                candidate, prior_metadata = prior
+                if _v5_resume_metadata_matches(prior_metadata, source, scale):
+                    prior_review_file = candidate
+                else:
+                    print(
+                        "CẢNH BÁO: checkpoint V5 cũ không khớp chính xác ảnh/hệ số hiện tại; "
+                        "engine sẽ tạo kiểm kê mới thay vì nhập quyết định sai.",
+                        file=sys.stderr,
+                    )
 
     print("\nTHÔNG TIN LỆNH")
-    print("  Chế độ : V5 SMART LAYERS (SAM 2.1 + semantic grouping + clean background)")
+    print("  Chế độ : V5 PRO EXHAUSTIVE LAYERS (inventory + ownership + review + clean plate)")
     print(f"  Input  : {source}")
     print(f"  Nguồn  : {source_size[0]}x{source_size[1]} px, {source_mode}")
     print(f"  Canvas : {final_size[0]}x{final_size[1]} px ({resource_plan['output_megapixels']:.1f} MP)")
-    print(f"  Layer tiền cảnh tối đa: {max_layers} (+ 1 nền)")
+    print("  Layer  : không cắt theo số lượng; mọi proposal đều được gán, từ chối có lý do hoặc đưa ra duyệt")
+    print(f"  Duyệt  : {options.get('review', 'gui')}")
+    if prior_review_file is not None:
+        print(f"  Resume : nạp checkpoint đã duyệt và xác minh lại từ {prior_review_file}")
     print(
         "  Tài nguyên ước tính bảo thủ: "
         f"{resource_plan['estimated_peak_ram_gib']:.2f} GiB RAM, "
@@ -1948,39 +2547,64 @@ def run_v5_job(
 
     target_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_bundle = target_dir.parent / f".{target_dir.name}.new-{uuid.uuid4().hex}"
+    removed_staging = cleanup_stale_v5_output_staging(
+        target_dir,
+        active_staging=staging_bundle,
+    )
+    if removed_staging:
+        suffix = "directory" if len(removed_staging) == 1 else "directories"
+        print(f"  Cleaned {len(removed_staging)} abandoned V5 staging {suffix}.")
     started = time.perf_counter()
+    failure_diagnostic: Path | None = None
+    failure_diagnostic_attempted = False
+
+    def preserve_failure_diagnostic_once() -> None:
+        nonlocal failure_diagnostic, failure_diagnostic_attempted
+        if failure_diagnostic_attempted:
+            return
+        failure_diagnostic_attempted = True
+        try:
+            failure_diagnostic = _preserve_v5_failure_diagnostics(
+                staging_bundle,
+                result_stem,
+            )
+        except (OSError, RuntimeError) as exc:
+            print(
+                f"CẢNH BÁO: không giữ được chẩn đoán V5 FAIL tối giản: {exc}",
+                file=sys.stderr,
+            )
+            return
+        if failure_diagnostic is not None:
+            print(
+                f"  Chẩn đoán V5 FAIL đã giữ tại: {failure_diagnostic}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     try:
         with tempfile.TemporaryDirectory(prefix="job_v5_", dir=WORK_DIR) as temporary_raw:
             job_dir = Path(temporary_raw)
             staged_input = stage_input(source, job_dir, icc_profile)
             normalized_sha = canonical_pixel_sha256(staged_input)
             master, master_info = prepare_v5_ai_master(source, staged_input, job_dir, scale)
-            command = [
-                str(PYTHON_V5),
-                "-B",
-                str(V5_ENGINE),
-                str(staged_input),
-                f"{scale:g}",
-                str(staging_bundle),
-                "--master",
-                str(master),
-                "--name",
-                result_stem,
-                "--max-layers",
-                str(max_layers),
-                "--inpaint",
-                str(options.get("inpaint", "auto")),
-                "--app-version",
-                APP_VERSION,
-            ]
-            if not bool(options.get("semantic", True)):
-                command.append("--no-semantic")
+            command = _build_v5_engine_command(
+                staged_input=staged_input,
+                scale=scale,
+                staging_bundle=staging_bundle,
+                master=master,
+                result_stem=result_stem,
+                options=options,
+                prior_review_file=prior_review_file,
+            )
             subprocess.run(command, check=True, cwd=ROOT_DIR)
 
             engine_manifest_path = staging_bundle / "manifest.json"
             if not engine_manifest_path.is_file():
                 raise RuntimeError("V5 không tạo manifest kiểm định.")
             metadata = json.loads(engine_manifest_path.read_text(encoding="utf-8"))
+            if str(metadata.get("qa_status") or "") == "FAIL":
+                preserve_failure_diagnostic_once()
+            _validate_v5_publish_manifest(metadata, final_size)
             if metadata.get("pipeline") != "V5_SMART_EDITABLE_LAYERS":
                 raise RuntimeError("Manifest V5 sai pipeline.")
             if metadata.get("final_size") != list(final_size):
@@ -2000,6 +2624,13 @@ def run_v5_job(
                     "source_path_identity_sha256": canonical_path_identity(source),
                     "normalized_stage_sha256": normalized_sha,
                     "launcher_master": master_info,
+                    "launcher_options": {
+                        "detail": str(options.get("detail", "exhaustive")),
+                        "review_mode": str(options.get("review", "gui")),
+                        "inpaint": str(options.get("inpaint", "auto")),
+                        "semantic": bool(options.get("semantic", True)),
+                        "allow_huge": bool(allow_huge),
+                    },
                     "resource_plan": resource_plan,
                     "final_bundle": str(target_dir),
                     "launcher_total_seconds": round(time.perf_counter() - started, 3),
@@ -2018,6 +2649,9 @@ def run_v5_job(
                     f"CẢNH BÁO: bundle đã publish; không ghi được bản sao manifest {report_path}: {exc}",
                     file=sys.stderr,
                 )
+    except BaseException:
+        preserve_failure_diagnostic_once()
+        raise
     finally:
         if staging_bundle.exists():
             shutil.rmtree(staging_bundle)
@@ -2482,6 +3116,9 @@ def run_batch(
     elif mode == "V5_LAYERS":
         if not PYTHON_V5.is_file() or not V5_ENGINE.is_file():
             raise UserError("Thiếu Python CUDA hoặc engine V5; batch chưa thể chạy.")
+        if v4_options.get("review") == "gui":
+            v4_options = dict(v4_options)
+            v4_options["review"] = "defer"
     elif mode in {"V4_PRINT", "V4_VECTOR"}:
         if not PYTHON_V4.is_file() or not V4_ENGINE.is_file():
             raise UserError("Thiếu Python hoặc engine V4 trong APP; batch chưa thể chạy.")
@@ -2550,9 +3187,9 @@ def main(argv: list[str] | None = None) -> int:
     if arguments and arguments[0].casefold() in {"review", "duyet"}:
         if len(arguments) != 2:
             raise UserError(
-                "Cú pháp: .\\upscale review <bundle-hoặc-TEXT_REVIEW.json>"
+                "Cú pháp: .\\upscale review <bundle-hoặc-file-duyệt.json>"
             )
-        return run_v7_review_command(arguments[1])
+        return run_review_command(arguments[1])
     mode, file_token, scale, allow_huge, v4_options = parse_command(arguments)
     source = resolve_source(file_token)
     with gpu_job_lock():

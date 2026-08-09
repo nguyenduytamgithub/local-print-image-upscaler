@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import ast
+import io
+import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -37,6 +42,556 @@ from v5lib.restore import restore_background  # noqa: E402
 
 
 class V5CliTests(unittest.TestCase):
+    def _write_v5_review_bundle(
+        self,
+        root: Path,
+        *,
+        original_source: Path | None = None,
+        scale: float = 1.0,
+    ) -> Path:
+        technical = root / "_KY_THUAT"
+        technical.mkdir(parents=True)
+        checkpoint = technical / "LAYER_REVIEW.json"
+        checkpoint.write_text(
+            json.dumps({"schema": "V5_LAYER_REVIEW_V2"}),
+            encoding="utf-8",
+        )
+        manifest: dict[str, object] = {
+            "pipeline": "V5_SMART_EDITABLE_LAYERS",
+            "engine_generation": "V5_PRO_EXHAUSTIVE_V2",
+            "review_resume_signature": upscale_cli.V5_REVIEW_RESUME_SIGNATURE,
+            "review_checkpoint": "_KY_THUAT/LAYER_REVIEW.json",
+            "scale": scale,
+            "detail": "exhaustive",
+        }
+        if original_source is not None:
+            manifest.update(
+                {
+                    "original_source": str(original_source.resolve()),
+                    "original_source_sha256": upscale_cli.sha256_file(original_source),
+                }
+            )
+        (root / "manifest.json").write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+        return checkpoint
+
+    def test_review_auto_routes_v5_output_bundle_by_checkpoint_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "poster_V5_LAYERS_x1"
+            checkpoint = self._write_v5_review_bundle(bundle)
+
+            resolved = upscale_cli.resolve_v5_review_target(bundle)
+
+            self.assertIsNotNone(resolved)
+            assert resolved is not None
+            self.assertEqual(resolved[0], checkpoint.resolve())
+            self.assertEqual(resolved[1]["pipeline"], "V5_SMART_EDITABLE_LAYERS")
+
+    def test_review_dispatch_keeps_non_v5_json_on_existing_v7_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            review = Path(temporary) / "TEXT_REVIEW.json"
+            review.write_text(
+                json.dumps({"schema": "V7_TEXT_REVIEW_V2"}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                upscale_cli, "run_v7_review_command", return_value=23
+            ) as run_v7:
+                result = upscale_cli.run_review_command(review)
+
+            self.assertEqual(result, 23)
+            run_v7.assert_called_once_with(review)
+
+    def test_v5_review_reports_immediate_save_and_required_rerun_truthfully(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "poster.png"
+            Image.new("RGB", (8, 8), "white").save(source)
+            bundle = root / "bundle"
+            checkpoint = self._write_v5_review_bundle(
+                bundle, original_source=source, scale=4.0
+            )
+            output = io.StringIO()
+            with mock.patch.object(
+                upscale_cli, "_run_v5_review_ui", return_value={}
+            ), redirect_stdout(output):
+                result = upscale_cli.run_v5_review_command(bundle)
+
+            text = output.getvalue()
+            self.assertEqual(result, 0)
+            self.assertIn(str(checkpoint.resolve()), text)
+            self.assertIn("mỗi thao tác được ghi ngay", text)
+            self.assertIn("PSD/ORA HIỆN TẠI CHƯA THAY ĐỔI", text)
+            self.assertIn(".\\upscale layers", text)
+            self.assertIn("--review gui", text)
+            self.assertIn("checkpoint đã lưu sẽ chỉ được áp dụng", text)
+
+    def test_v5_engine_command_receives_existing_review_checkpoint(self) -> None:
+        review = Path(r"C:\bundle\_KY_THUAT\LAYER_REVIEW.json")
+        command = upscale_cli._build_v5_engine_command(
+            staged_input=Path(r"C:\work\source.png"),
+            scale=4.0,
+            staging_bundle=Path(r"C:\work\new-bundle"),
+            master=Path(r"C:\work\master.png"),
+            result_stem="poster",
+            options={
+                "detail": "exhaustive",
+                "review": "defer",
+                "inpaint": "poster",
+                "semantic": True,
+            },
+            prior_review_file=review,
+        )
+
+        review_index = command.index("--review-file")
+        self.assertEqual(command[review_index + 1], str(review))
+        self.assertEqual(command[command.index("--review-mode") + 1], "defer")
+
+    def test_v5_resume_requires_current_inventory_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "poster.png"
+            Image.new("RGB", (8, 8), "white").save(source)
+            metadata: dict[str, object] = {
+                "pipeline": "V5_SMART_EDITABLE_LAYERS",
+                "engine_generation": "V5_PRO_EXHAUSTIVE_V2",
+                "review_resume_signature": upscale_cli.V5_REVIEW_RESUME_SIGNATURE,
+                "original_source": str(source.resolve()),
+                "original_source_sha256": upscale_cli.sha256_file(source),
+                "scale": 1.0,
+            }
+            self.assertTrue(
+                upscale_cli._v5_resume_metadata_matches(metadata, source, 1.0)
+            )
+            metadata.pop("review_resume_signature")
+            self.assertFalse(
+                upscale_cli._v5_resume_metadata_matches(metadata, source, 1.0)
+            )
+
+    def test_v5_hard_qa_fail_is_never_publishable(self) -> None:
+        manifest: dict[str, object] = {
+            "pipeline": "V5_SMART_EDITABLE_LAYERS",
+            "final_size": [100, 80],
+            "grouping": {"selected_layer_count": 5},
+            "qa_status": "FAIL",
+        }
+        with self.assertRaisesRegex(RuntimeError, "hard QA failed"):
+            upscale_cli._validate_v5_publish_manifest(manifest, (100, 80))
+        manifest["qa_status"] = "REVIEW_REQUIRED"
+        upscale_cli._validate_v5_publish_manifest(manifest, (100, 80))
+
+    def test_v5_publish_gate_is_wired_only_into_v5_job(self) -> None:
+        source_path = PROJECT_ROOT / "APP" / "upscale_cli.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        callers: list[str] = []
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "_validate_v5_publish_manifest"
+                for child in ast.walk(node)
+            ):
+                callers.append(node.name)
+        self.assertEqual(callers, ["run_v5_job"])
+
+    def test_v5_review_signature_is_synced_between_launcher_and_engine(self) -> None:
+        engine_path = V5_DIR / "layer_engine_v5_pro.py"
+        tree = ast.parse(engine_path.read_text(encoding="utf-8"))
+        engine_signature: str | None = None
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name)
+                and target.id == "REVIEW_RESUME_SIGNATURE"
+                for target in node.targets
+            ):
+                continue
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                engine_signature = node.value.value
+        self.assertEqual(engine_signature, upscale_cli.V5_REVIEW_RESUME_SIGNATURE)
+
+    def test_v5_failure_diagnostics_are_small_safe_and_atomically_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            staging = root / "failed-bundle"
+            technical = staging / upscale_cli.TECHNICAL_DIR_NAME
+            technical.mkdir(parents=True)
+            (staging / "manifest.json").write_text(
+                json.dumps({"qa_status": "FAIL", "attempt": 1}),
+                encoding="utf-8",
+            )
+            (technical / "QA_REPORT.json").write_text("first-json", encoding="utf-8")
+            (technical / "QA_REPORT.html").write_text("first-html", encoding="utf-8")
+            (technical / "RECOMPOSITION_DIFF_X8.png").write_bytes(b"diff")
+            (technical / "LAYER_REVIEW.json").write_text("review", encoding="utf-8")
+            (technical / "SOURCE_FOR_REVIEW.png").write_bytes(b"source")
+            (technical / "BACKGROUND_FOR_OCR_QA.png").write_bytes(b"clean")
+            layers = staging / "LAYERS"
+            layers.mkdir()
+            (layers / "must-not-be-copied.png").write_bytes(b"large-layer")
+
+            target = work / "v5_last_failure_bad_poster"
+            target.mkdir(parents=True)
+            (target / "stale.txt").write_text("stale", encoding="utf-8")
+
+            with mock.patch.object(upscale_cli, "WORK_DIR", work):
+                first = upscale_cli._preserve_v5_failure_diagnostics(
+                    staging,
+                    "bad:poster",
+                )
+                self.assertEqual(first, target.resolve())
+                self.assertEqual(
+                    {
+                        path.relative_to(first).as_posix()
+                        for path in first.rglob("*")
+                        if path.is_file()
+                    },
+                    {
+                        "manifest.json",
+                        f"{upscale_cli.TECHNICAL_DIR_NAME}/QA_REPORT.json",
+                        f"{upscale_cli.TECHNICAL_DIR_NAME}/QA_REPORT.html",
+                        f"{upscale_cli.TECHNICAL_DIR_NAME}/RECOMPOSITION_DIFF_X8.png",
+                        f"{upscale_cli.TECHNICAL_DIR_NAME}/LAYER_REVIEW.json",
+                        f"{upscale_cli.TECHNICAL_DIR_NAME}/SOURCE_FOR_REVIEW.png",
+                        f"{upscale_cli.TECHNICAL_DIR_NAME}/BACKGROUND_FOR_OCR_QA.png",
+                    },
+                )
+                self.assertFalse((first / "stale.txt").exists())
+                self.assertFalse((first / "LAYERS").exists())
+
+                (staging / "manifest.json").write_text(
+                    json.dumps({"qa_status": "FAIL", "attempt": 2}),
+                    encoding="utf-8",
+                )
+                (technical / "QA_REPORT.json").write_text(
+                    "second-json",
+                    encoding="utf-8",
+                )
+                second = upscale_cli._preserve_v5_failure_diagnostics(
+                    staging,
+                    "bad:poster",
+                )
+
+            self.assertEqual(second, first)
+            self.assertEqual(
+                (second / upscale_cli.TECHNICAL_DIR_NAME / "QA_REPORT.json").read_text(
+                    encoding="utf-8"
+                ),
+                "second-json",
+            )
+            self.assertEqual(
+                json.loads((second / "manifest.json").read_text(encoding="utf-8"))[
+                    "attempt"
+                ],
+                2,
+            )
+
+    def test_stale_v5_output_staging_cleanup_is_exact_and_preserves_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            target = parent / "poster_V5_LAYERS_x1"
+            target.mkdir()
+            (target / "published.txt").write_text("keep", encoding="utf-8")
+            stale = parent / f".{target.name}.new-{'a' * 32}"
+            stale.mkdir()
+            (stale / "partial.txt").write_text("remove", encoding="utf-8")
+            active = parent / f".{target.name}.new-{'b' * 32}"
+            active.mkdir()
+            (active / "active.txt").write_text("keep", encoding="utf-8")
+            near_matches = [
+                parent / f".{target.name}.new-{'c' * 31}",
+                parent / f".{target.name}.new-{'G' * 32}",
+                parent / f".{target.name}.new-{'d' * 32}-extra",
+                parent / f".another-target.new-{'e' * 32}",
+                parent / ".unrelated-dot-directory",
+            ]
+            for path in near_matches:
+                path.mkdir()
+
+            removed = upscale_cli.cleanup_stale_v5_output_staging(
+                target,
+                active_staging=active,
+            )
+
+            self.assertEqual(removed, [stale.resolve()])
+            self.assertFalse(stale.exists())
+            self.assertEqual((target / "published.txt").read_text(encoding="utf-8"), "keep")
+            self.assertEqual((active / "active.txt").read_text(encoding="utf-8"), "keep")
+            self.assertTrue(all(path.is_dir() for path in near_matches))
+
+    def test_stale_v5_output_staging_cleanup_refuses_reparse_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            target = parent / "poster_V5_LAYERS_x1"
+            target.mkdir()
+            candidate = parent / f".{target.name}.new-{'f' * 32}"
+            candidate.mkdir()
+            sentinel = candidate / "do-not-delete.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+            original_check = upscale_cli._is_link_or_reparse_point
+
+            def fake_reparse_check(path: Path) -> bool:
+                if path == candidate:
+                    return True
+                return original_check(path)
+
+            with mock.patch.object(
+                upscale_cli,
+                "_is_link_or_reparse_point",
+                side_effect=fake_reparse_check,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "link/reparse point"):
+                    upscale_cli.cleanup_stale_v5_output_staging(target)
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+
+    def test_run_v5_job_never_installs_a_hard_fail_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "poster.png"
+            Image.new("RGB", (8, 8), "white").save(source)
+            work = root / "work"
+            work.mkdir()
+            captured: dict[str, Path] = {}
+
+            def fake_build_command(**kwargs: object) -> list[str]:
+                staging = kwargs["staging_bundle"]
+                assert isinstance(staging, Path)
+                captured["staging"] = staging
+                return ["fake-v5-engine"]
+
+            def fake_subprocess_run(*_args: object, **_kwargs: object) -> object:
+                staging = captured["staging"]
+                staging.mkdir(parents=True)
+                technical = staging / upscale_cli.TECHNICAL_DIR_NAME
+                technical.mkdir()
+                (staging / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "pipeline": "V5_SMART_EDITABLE_LAYERS",
+                            "final_size": [8, 8],
+                            "grouping": {"selected_layer_count": 1},
+                            "qa_status": "FAIL",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (technical / "QA_REPORT.json").write_text(
+                    json.dumps({"status": "FAIL", "hard_failures": ["unsafe"]}),
+                    encoding="utf-8",
+                )
+                (technical / "QA_REPORT.html").write_text(
+                    "<html>unsafe</html>",
+                    encoding="utf-8",
+                )
+                (technical / "RECOMPOSITION_DIFF_X8.png").write_bytes(b"diff")
+                (technical / "LAYER_REVIEW.json").write_text(
+                    "review",
+                    encoding="utf-8",
+                )
+                (technical / "SOURCE_FOR_REVIEW.png").write_bytes(b"source")
+                (technical / "BACKGROUND_FOR_OCR_QA.png").write_bytes(b"clean")
+                layers = staging / "LAYERS"
+                layers.mkdir()
+                (layers / "must-not-survive.png").write_bytes(b"layer")
+                return object()
+
+            resource_plan = {
+                "output_megapixels": 0.000064,
+                "estimated_peak_ram_gib": 0.01,
+                "estimated_working_disk_gib": 0.01,
+            }
+            options: dict[str, object] = {
+                "detail": "exhaustive",
+                "review": "defer",
+                "inpaint": "auto",
+                "semantic": True,
+                "max_layers": 24,
+            }
+            last_good = root / "output" / "V5_LAYERS" / "poster_V5_LAYERS_x1"
+            last_good.mkdir(parents=True)
+            sentinel = last_good / "last-good.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(upscale_cli, "OUTPUT_DIR", root / "output"),
+                mock.patch.object(upscale_cli, "WORK_DIR", work),
+                mock.patch.object(upscale_cli, "APP_DIR", root / "app"),
+                mock.patch.object(upscale_cli, "PYTHON_V5", source),
+                mock.patch.object(upscale_cli, "V5_ENGINE", source),
+                mock.patch.object(
+                    upscale_cli,
+                    "inspect_image",
+                    return_value=((8, 8), "RGB", None),
+                ),
+                mock.patch.object(
+                    upscale_cli,
+                    "validate_v5_resource_plan",
+                    return_value=resource_plan,
+                ),
+                mock.patch.object(upscale_cli, "stage_input", return_value=source),
+                mock.patch.object(
+                    upscale_cli,
+                    "canonical_pixel_sha256",
+                    return_value="0" * 64,
+                ),
+                mock.patch.object(
+                    upscale_cli,
+                    "prepare_v5_ai_master",
+                    return_value=(source, {}),
+                ),
+                mock.patch.object(
+                    upscale_cli,
+                    "_build_v5_engine_command",
+                    side_effect=fake_build_command,
+                ),
+                mock.patch.object(
+                    upscale_cli.subprocess,
+                    "run",
+                    side_effect=fake_subprocess_run,
+                ),
+                mock.patch.object(
+                    upscale_cli,
+                    "resolve_v5_review_target",
+                    return_value=None,
+                ),
+                redirect_stderr(stderr),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "hard QA failed"):
+                    upscale_cli.run_v5_job(source, 1.0, False, options)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+            diagnostic = work / "v5_last_failure_poster"
+            self.assertTrue(diagnostic.is_dir())
+            self.assertEqual(
+                {
+                    path.relative_to(diagnostic).as_posix()
+                    for path in diagnostic.rglob("*")
+                    if path.is_file()
+                },
+                {
+                    "manifest.json",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/QA_REPORT.json",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/QA_REPORT.html",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/RECOMPOSITION_DIFF_X8.png",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/LAYER_REVIEW.json",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/SOURCE_FOR_REVIEW.png",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/BACKGROUND_FOR_OCR_QA.png",
+                },
+            )
+            self.assertFalse((diagnostic / "LAYERS").exists())
+            self.assertIn(str(diagnostic), stderr.getvalue())
+            self.assertFalse(captured["staging"].exists())
+
+    def test_v5_failure_diagnostics_skip_oversized_optional_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            staging = root / "failed-bundle"
+            technical = staging / upscale_cli.TECHNICAL_DIR_NAME
+            technical.mkdir(parents=True)
+            (staging / "manifest.json").write_text(
+                json.dumps({"qa_status": "FAIL"}), encoding="utf-8"
+            )
+            (technical / "QA_REPORT.json").write_bytes(b"q")
+            (technical / "QA_REPORT.html").write_bytes(b"h")
+            (technical / "RECOMPOSITION_DIFF_X8.png").write_bytes(b"d" * 30)
+            (technical / "LAYER_REVIEW.json").write_bytes(b"r" * 30)
+            (technical / "SOURCE_FOR_REVIEW.png").write_bytes(b"s" * 65)
+            (technical / "BACKGROUND_FOR_OCR_QA.png").write_bytes(b"b")
+
+            with (
+                mock.patch.object(upscale_cli, "WORK_DIR", work),
+                mock.patch.object(
+                    upscale_cli,
+                    "V5_FAILURE_DIAGNOSTIC_MAX_FILE_BYTES",
+                    64,
+                ),
+                mock.patch.object(
+                    upscale_cli,
+                    "V5_FAILURE_DIAGNOSTIC_MAX_TOTAL_BYTES",
+                    80,
+                ),
+            ):
+                diagnostic = upscale_cli._preserve_v5_failure_diagnostics(
+                    staging, "bounded"
+                )
+
+            self.assertIsNotNone(diagnostic)
+            assert diagnostic is not None
+            files = {
+                path.relative_to(diagnostic).as_posix()
+                for path in diagnostic.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(
+                files,
+                {
+                    "manifest.json",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/QA_REPORT.json",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/QA_REPORT.html",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/RECOMPOSITION_DIFF_X8.png",
+                    f"{upscale_cli.TECHNICAL_DIR_NAME}/BACKGROUND_FOR_OCR_QA.png",
+                },
+            )
+            self.assertLessEqual(
+                sum(path.stat().st_size for path in diagnostic.rglob("*") if path.is_file()),
+                80,
+            )
+
+    def test_cmd_review_runtime_does_not_require_v7_environment(self) -> None:
+        command_file = (PROJECT_ROOT / "upscale.cmd").read_text(encoding="utf-8")
+
+        for alias in ("review", "duyet"):
+            self.assertIn(
+                f'if /I "%~1"=="{alias}" if exist '
+                '"%RESIZE_ROOT%APP\\engines\\V3\\.venv\\Scripts\\python.exe"',
+                command_file,
+            )
+            self.assertIn(
+                f'if /I "%~1"=="{alias}" if not exist '
+                '"%RESIZE_ROOT%APP\\engines\\V3\\.venv\\Scripts\\python.exe" if exist '
+                '"%RESIZE_ROOT%APP\\engines\\V5\\.venv\\Scripts\\python.exe"',
+                command_file,
+            )
+
+    def test_v5_batch_turns_gui_review_into_defer_for_every_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "one.png"
+            Image.new("RGB", (8, 8), "white").save(source)
+            received: list[dict[str, object]] = []
+
+            def fake_run_job(
+                _mode: str,
+                _source: Path,
+                _scale: float,
+                _allow_huge: bool,
+                options: dict[str, object],
+                **_kwargs: object,
+            ) -> Path:
+                received.append(dict(options))
+                return directory / "result"
+
+            with mock.patch.object(upscale_cli, "PYTHON_V5", source), mock.patch.object(
+                upscale_cli, "V5_ENGINE", source
+            ), mock.patch.object(upscale_cli, "run_job", side_effect=fake_run_job):
+                result = upscale_cli.run_batch(
+                    "V5_LAYERS",
+                    directory,
+                    1.0,
+                    False,
+                    {"review": "gui"},
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual([item["review"] for item in received], ["defer"])
+
     def test_topology_failure_summary_names_layer_threshold_and_relation(self) -> None:
         report = {
             "layers": [
@@ -85,14 +640,29 @@ class V5CliTests(unittest.TestCase):
 
     def test_v5_accepts_source_scale_and_options(self) -> None:
         mode, token, scale, allow_huge, options = upscale_cli.parse_command(
-            ["layers", "poster.png", "1", "--max-layers", "18", "--inpaint", "poster"]
+            [
+                "layers",
+                "poster.png",
+                "1",
+                "--detail",
+                "exhaustive",
+                "--review",
+                "defer",
+                "--inpaint",
+                "poster",
+            ]
         )
         self.assertEqual(mode, "V5_LAYERS")
         self.assertEqual(token, "poster.png")
         self.assertEqual(scale, 1.0)
         self.assertFalse(allow_huge)
-        self.assertEqual(options["max_layers"], 18)
+        self.assertEqual(options["detail"], "exhaustive")
+        self.assertEqual(options["review"], "defer")
         self.assertEqual(options["inpaint"], "poster")
+
+    def test_v5_rejects_fractional_scale_before_rendering_masks(self) -> None:
+        with self.assertRaisesRegex(upscale_cli.UserError, "integer scale"):
+            upscale_cli.parse_command(["layers", "poster.png", "1.5"])
 
     def test_v5_only_options_are_rejected_by_v3(self) -> None:
         with self.assertRaises(upscale_cli.UserError):
@@ -104,7 +674,7 @@ class V5CliTests(unittest.TestCase):
                 (4000, 4000), (24_000, 24_000), allow_huge=True
             )
 
-    def test_v5_resource_plan_accounts_for_foreground_layer_budget(self) -> None:
+    def test_v5_resource_plan_is_independent_of_legacy_layer_cap(self) -> None:
         small = upscale_cli.validate_v5_resource_plan(
             (256, 256),
             (512, 512),
@@ -117,10 +687,9 @@ class V5CliTests(unittest.TestCase):
             allow_huge=False,
             max_layers=60,
         )
-        self.assertGreater(large["estimated_peak_ram_gib"], small["estimated_peak_ram_gib"])
-        self.assertGreater(
-            large["estimated_working_disk_gib"], small["estimated_working_disk_gib"]
-        )
+        self.assertEqual(large["estimated_peak_ram_gib"], small["estimated_peak_ram_gib"])
+        self.assertEqual(large["estimated_working_disk_gib"], small["estimated_working_disk_gib"])
+        self.assertIn("no hard layer cap", str(large["layer_policy"]))
 
     def test_direct_engine_never_deletes_an_existing_output_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
