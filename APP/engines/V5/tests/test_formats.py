@@ -18,7 +18,12 @@ if str(V5_ROOT) not in sys.path:
     sys.path.insert(0, str(V5_ROOT))
 
 from v5lib.formats import (  # noqa: E402
+    CONTACT_SHEET_MAX_DIMENSION,
+    CONTACT_SHEET_MAX_PIXELS,
+    CONTACT_SHEET_PAGE_CAPACITY,
     RenderedLayer,
+    asset_records,
+    export_contact_sheet,
     export_ora,
     export_png_assets,
     export_psd,
@@ -108,6 +113,88 @@ def sample_bundle() -> tuple[Image.Image, list[RenderedLayer], Image.Image]:
 
 
 class FormatTests(unittest.TestCase):
+    def test_contact_sheet_keeps_single_file_layout_for_small_jobs(self) -> None:
+        background, rendered, _expected = sample_bundle()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "06_sample_CONTACT_SHEET.png"
+            result = export_contact_sheet(output, background, rendered)
+            self.assertIsNone(result)
+            self.assertTrue(output.is_file())
+            self.assertFalse((root / "CONTACT_SHEETS").exists())
+            with Image.open(output) as sheet:
+                self.assertEqual(sheet.size, (1200, 292))
+
+    def test_large_contact_sheet_is_bounded_paginated_and_deterministic(self) -> None:
+        canvas = (64, 48)
+        background = Image.new("RGB", canvas, (245, 240, 225))
+        rendered = [
+            make_rendered(
+                f"layer_{index:03d}",
+                f"Layer {index:03d}",
+                Image.new(
+                    "RGBA",
+                    (8, 8),
+                    ((index * 17) % 256, (index * 29) % 256, (index * 43) % 256, 255),
+                ),
+                index % 40,
+                index % 30,
+                canvas,
+            )
+            for index in range(CONTACT_SHEET_PAGE_CAPACITY * 2 + 6)
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "06_large_CONTACT_SHEET.png"
+            export_contact_sheet(output, background, rendered)
+            pages_dir = root / "CONTACT_SHEETS"
+            pages = sorted(pages_dir.glob("page_*.png"))
+            self.assertEqual([page.name for page in pages], [
+                "page_001.png",
+                "page_002.png",
+                "page_003.png",
+            ])
+            for image_path in [output, *pages]:
+                with Image.open(image_path) as image:
+                    width, height = image.size
+                    self.assertLessEqual(max(width, height), CONTACT_SHEET_MAX_DIMENSION)
+                    self.assertLessEqual(width * height, CONTACT_SHEET_MAX_PIXELS)
+
+            recorded_paths = {record["path"] for record in asset_records(root)}
+            self.assertIn("06_large_CONTACT_SHEET.png", recorded_paths)
+            self.assertEqual(
+                sorted(path for path in recorded_paths if path.startswith("CONTACT_SHEETS/")),
+                [
+                    "CONTACT_SHEETS/page_001.png",
+                    "CONTACT_SHEETS/page_002.png",
+                    "CONTACT_SHEETS/page_003.png",
+                ],
+            )
+            guide = root / "guide.txt"
+            guide.write_text("portable guide", encoding="utf-8")
+            archive_report = package_layers_zip(
+                root / "layers.zip",
+                root,
+                [guide],
+            )
+            self.assertEqual(archive_report["members"], ["guide.txt"])
+            first_hashes = {
+                image_path.relative_to(root).as_posix(): sha256_file(image_path)
+                for image_path in [output, *pages]
+            }
+            stale = pages_dir / "page_999.png"
+            stale.write_bytes(b"stale generated page")
+            export_contact_sheet(output, background, rendered)
+            self.assertFalse(stale.exists())
+            second_pages = sorted(pages_dir.glob("page_*.png"))
+            second_hashes = {
+                image_path.relative_to(root).as_posix(): sha256_file(image_path)
+                for image_path in [output, *second_pages]
+            }
+            self.assertEqual(first_hashes, second_hashes)
+            export_contact_sheet(output, background, rendered[:1])
+            self.assertFalse(pages_dir.exists())
+
     def test_color_pngs_keep_srgb_icc_while_alpha_masks_remain_untagged(self) -> None:
         profile = srgb_icc_bytes()
         background, rendered, _expected = sample_bundle()
@@ -337,6 +424,55 @@ class FormatTests(unittest.TestCase):
             group = list(root_stack)[1]
             self.assertEqual(group.tag, "stack")
             self.assertEqual(group.attrib.get("isolation"), "auto")
+
+    def test_user_review_group_is_real_in_psd_and_ora_without_reordering(self) -> None:
+        background, rendered, expected = sample_bundle()
+        groups = [
+            {
+                "id": "USER_GROUP_1",
+                "name": "Cụm sản phẩm",
+                "member_ids": ["parent", "top"],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            psd_report = export_psd(
+                root / "grouped.psd",
+                background,
+                rendered,
+                expected,
+                user_groups=groups,
+            )
+            ora_report = export_ora(
+                root / "grouped.ora",
+                background,
+                rendered,
+                expected,
+                user_groups=groups,
+            )
+        self.assertLessEqual(psd_report["roundtrip_qa"]["max_abs_error"], 1)
+        self.assertLessEqual(ora_report["expected_composite_qa"]["max_abs_error"], 1)
+        psd_group = psd_report["layer_tree_bottom_to_top"][1]
+        self.assertEqual(psd_group["name"], "USER GROUP - Cụm sản phẩm")
+        self.assertEqual(
+            [item["name"] for item in psd_group["children_bottom_to_top"]],
+            ["GROUP - 01 Nhóm sản phẩm", "02 Chi tiết trên cùng"],
+        )
+        ora_group = ora_report["layer_tree_bottom_to_top"][1]
+        self.assertEqual(ora_group, psd_group)
+
+    def test_openraster_validator_keeps_limit_when_pillow_global_is_none(self) -> None:
+        background, rendered, expected = sample_bundle()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "layers.ora"
+            export_ora(output, background, rendered, expected)
+            previous = Image.MAX_IMAGE_PIXELS
+            try:
+                Image.MAX_IMAGE_PIXELS = None
+                report = validate_ora(output, expected_composite=expected)
+            finally:
+                Image.MAX_IMAGE_PIXELS = previous
+        self.assertEqual(report["canvas"], list(background.size))
 
     def test_openraster_validator_rejects_unsafe_member_and_root_attributes(self) -> None:
         background, rendered, expected = sample_bundle()

@@ -11,17 +11,39 @@ Chương trình xử lý ảnh cục bộ trên Windows cho bảng hiệu, poste
 | **V3 High** | PNG AI chất lượng cao | Ảnh chụp hoặc ảnh nhiều texture, máy có NVIDIA CUDA |
 | **V4 Print** | Raster AI/USM đã qua ablation + SVG/PDF/X-4 + PNG | Bản in nghiêm túc, cần phục hồi đồng đều toàn ảnh bằng NVIDIA CUDA |
 | **V4 Vector** | SVG/PDF/X-4 toàn path | Logo, chữ, mảng màu phẳng; không dùng cho ảnh chụp/gradient |
-| **V5 Smart Layers** | OpenRaster + PNG/mask ZIP; PSD khi trong giới hạn | Tách ảnh phẳng thành số lượng layer raster hữu ích để sửa trong Photoshop/Krita/Photopea/Canva |
+| **V5 Pro Layers** | OpenRaster + PNG/mask ZIP; PSD khi trong giới hạn + hồ sơ duyệt/QA | Tách poster phẳng thành layer raster có kiểm kê, duyệt và clean plate để sửa trong Photoshop/Krita/Photopea/Canva |
 | **V7 Design Repair** | PNG phục dựng toàn ảnh + SVG có chữ Unicode chỉnh sửa được + hồ sơ duyệt/QA | Poster/catalogue vừa mờ vừa có chữ gãy, thiếu dấu hoặc sai chính tả cần người dùng xác nhận |
 
-V5 là engine độc lập và không xóa V2/V3/V4. Nó dùng SAM 2.1 để tìm vùng, tự phân luồng
-poster/đồ họa với ảnh tự nhiên nhiều texture, rồi gộp theo panel, hàng, màu, hình học và quan hệ
-cha–con trong giới hạn số layer. Grounding DINO chỉ cung cấp nhãn gợi ý; Tesseract cùng model
-`tessdata_best` tiếng Việt đã pin cung cấp vùng/dòng OCR khi máy có Tesseract 5.
-Riêng chữ raster được làm sạch topology O/G/N và dấu tiếng Việt trước khi ViTMatte-S đã khóa
-revision ước lượng alpha mép trên GPU/CPU; model không được quyền đổi hình chữ hoặc lấp lại khoảng âm.
-Nền phía dưới vật thể được tái tạo nhưng luôn ghi rõ là **synthesized**: ảnh phẳng không chứa
-pixel vốn bị che, nên không thuật toán nào chứng minh được nền gốc chính xác.
+V5 Pro là engine độc lập và không xóa V2/V3/V4. Nó lập inventory chữ, QR, khung, đường và chi tiết;
+kết hợp Grounding DINO, SAM 2.1, BiRefNet, hình học cùng LayerD rồi buộc mọi proposal phải có owner,
+lý do từ chối hoặc trạng thái chờ duyệt. LayerD là **nguồn đề xuất phụ trợ**, không phải đáp án cuối:
+raw layer của nó không được xuất mù nếu ownership, review và QA chưa chấp nhận. V5 Pro không cắt layer
+theo con số 24/60; nó stream crop chặt và giữ sổ proposal đầy đủ. Nếu một cụm LayerD không qua policy
+đồng nhất/an toàn, V5 không xuất union dễ kéo dính chi tiết: từng mảnh connected được giữ thành node
+nguyên tử riêng, `unresolved` và không move-safe để duyệt. Tương tự, matte semantic có BiRefNet báo
+refinement thất bại vẫn có thể được giữ làm ứng viên xem lại nhưng không bao giờ tự xác nhận.
+
+Nền sạch phía dưới là một clean plate **synthesized trên toàn canvas**. Panel/frame/line chỉ được xem
+là sạch khi có bề mặt tham chiếu đã kiểm tra; mọi sai khác RGB/antialias quan sát được so với bề mặt đó
+được khoét khỏi geometry sạch. Phần bù của ownership nhìn thấy — gồm cả các pixel vừa khoét — được giữ
+nguyên trong layer review **ở trên cùng**
+`REVIEW - SOURCE REMAINDER (hide to reveal clean background)`. Giữ layer này hiện để bảo toàn diện mạo
+nguồn; ẩn nó để thấy các bề mặt sạch. Geometry residual không có clean reference luôn `unresolved` và
+không move-safe. Ảnh phẳng không chứa pixel vốn bị che hay layer graph gốc, nên `PASS` chỉ có nghĩa các
+gate đã khai báo đạt trên kết quả suy luận; nó không chứng minh đã khôi phục file thiết kế ban đầu hoặc
+đạt một tỷ lệ chính xác tuyệt đối.
+
+Khung được phép tự dựng lại chỉ khi lỗ trong trội cùng bằng chứng sạch ở cạnh bên/cạnh đáy đủ để tạo
+topology chuẩn, thẳng và khép kín. Dải ribbon/chữ dính vào contour bị loại khỏi khung; nếu không tách
+được chắc chắn thì candidate chờ duyệt. QA kiểm đúng `full_support` sẽ xuất: frame phải là một vòng
+liền có lỗ trong trội, panel phải đặc và line không được kéo theo nhiễu theo trục vuông góc.
+
+Một semantic product mask sạch nhưng chỉ chứng minh được **toàn bộ union đang nhìn thấy**, không chứng
+minh từng sản phẩm độc lập, thường được ghi `atomicity_unverified`/`whole_visible_union`. Chỉ khi bằng
+chứng instance độc lập nêu rõ `count > 1`, node mới mang `compound_subassembly`. Cả hai trường hợp có
+thể move-safe như toàn bộ nhóm nhìn thấy nhưng vẫn `unresolved`, không `auto_confirmed`/auto-atomic;
+V5 không bịa ranh giới đang bị che giữa các vật thể. Trang review giải thích lý do này bằng câu dễ đọc
+cho từng node thay vì bắt người dùng tự diễn giải metadata kỹ thuật.
 
 V7 mặc định phục dựng **toàn bộ lớp raster** chứ không chỉ vá vài vùng chữ. Nó chạy các bước deblur/denoise/
 tăng chi tiết quan sát được có gate và rollback, sau đó gọi đúng **một** checkpoint Swin2SR fidelity/PSNR
@@ -84,11 +106,16 @@ cũng chạy đồng đều khi được đánh giá. Vector không được dù
 
 ## Dùng nhanh
 
-Mở PowerShell và đứng tại thư mục dự án:
+Trên máy mới, clone repository công khai rồi đứng tại thư mục vừa clone:
 
 ```powershell
-cd "C:\Users\Admin\Desktop\RESIZE"
+git clone https://github.com/nguyenduytamgithub/local-print-image-upscaler.git
+cd .\local-print-image-upscaler
 ```
+
+Nếu đã tải dự án ở vị trí khác, dùng `cd "<đường-dẫn-thư-mục-dự-án>"`. Ví dụ **chỉ trên máy đang
+phát triển tài liệu này**, thư mục hiện tại là `C:\Users\Admin\Desktop\RESIZE`; máy khác không cần
+tạo đúng đường dẫn đó.
 
 Bỏ ảnh vào `INPUT`, rồi chạy một trong các lệnh:
 
@@ -105,7 +132,7 @@ Bỏ ảnh vào `INPUT`, rồi chạy một trong các lệnh:
 # V4 toàn vector cho logo/artwork phẳng
 .\upscale vector logo.png 4 --width-mm 3000
 
-# V5 tách layer ở kích thước gốc — nên dùng để chỉnh sửa nhẹ
+# V5 Pro lập layer ở kích thước gốc — quy trình chỉnh sửa được khuyến nghị
 .\upscale layers poster.png 1
 
 # V5 layer x4 trên master AI V3 — cần bộ model V3
@@ -117,7 +144,8 @@ Bỏ ảnh vào `INPUT`, rồi chạy một trong các lệnh:
 # V7 sửa chữ rồi làm lớn x4 — cần V3 CUDA
 .\upscale repair poster.png 4
 
-# Mở lại màn hình duyệt đơn giản của một bundle V7 (Chrome được ưu tiên)
+# Mở lại màn hình duyệt của bundle V5 hoặc V7 (Chrome được ưu tiên)
+.\upscale review "C:\duong-dan\poster_V5_LAYERS_x1"
 .\upscale review "C:\duong-dan\poster_V7_REPAIR_x1"
 ```
 
@@ -138,7 +166,9 @@ cấu trúc thư mục và xử lý tuần tự:
 ```
 
 Mỗi ảnh trong batch V4 dùng chung hệ số `n`, khổ rộng, bleed và ICC profile đã truyền.
-Mỗi ảnh batch V5 dùng cùng `n`, chạy tuần tự để không tranh VRAM và tạo một bundle riêng.
+Mỗi ảnh batch V5 dùng cùng `n`, chạy tuần tự để không tranh VRAM và tự chuyển `--review gui` thành
+`defer`. Mở từng bundle bằng `upscale review`, lưu quyết định rồi chạy lại đúng lệnh thư mục; launcher
+chỉ resume checkpoint khớp chính xác ảnh, hệ số và proposal ledger.
 Batch V7 tự chuyển chế độ duyệt GUI sang `defer`. Mở từng bundle bằng
 `.\upscale review "<đường-dẫn-bundle>"` (hoặc bí danh `duyet`), bấm lưu quyết định trên trang cục bộ rồi
 chạy lại **đúng lệnh thư mục**. Launcher tự nạp hồ sơ đúng của từng ảnh; người dùng không cần mở hay sửa
@@ -149,61 +179,155 @@ Nếu mục tiêu chỉ là làm rõ raster và giữ nguyên chữ/số hiện 
 vùng còn lại**. Đây là bulk-keep an toàn: nó không áp dụng chữ OCR đề xuất, không bulk-replace và không
 thay giá, số điện thoại hay mã hàng. Sau đó bấm **Lưu và hoàn tất** để đóng phiên; không cần nhập lại chữ.
 
-## Lệnh V5 Smart Layers
+## Lệnh V5 Pro Layers
 
 ```text
 .\upscale layers <file-hoặc-thư-mục> <n>
-                  [--max-layers 4..60] [--inpaint auto|poster|lama]
+                  [--detail exhaustive|grouped]
+                  [--review gui|defer|auto]
+                  [--inpaint auto|poster|lama]
                   [--no-semantic] [--allow-huge]
+
+.\upscale review <bundle-hoặc-LAYER_REVIEW.json>
+.\upscale duyet  <bundle-hoặc-LAYER_REVIEW.json>
 ```
 
-- `n=1`: tách/chỉnh ở đúng kích thước nguồn, nhẹ nhất và không cần bộ checkpoint super-resolution V3.
-- `1<n<=20`: lấy master AI V3 native x4 đã kiểm định rồi resample một lần tới kích thước yêu cầu;
-  vì vậy máy phải có đủ ba checkpoint V3 cục bộ.
-- Mặc định tối đa 24 layer tiền cảnh; nền tổng hợp là một layer riêng, nên tổng tối đa là 25.
-  Mảnh nhỏ được nhập vào khối cha thay vì tạo hàng trăm “hột”.
-- `poster` ưu tiên nền màu/gradient/hình học; `lama` dùng LaMa cho texture ảnh; `auto` chọn bảo thủ
-  từ đặc trưng ảnh. Không chế độ nào khôi phục được pixel gốc vốn bị vật thể che.
-- `--allow-huge` cho phép vượt cảnh báo 120 MP sau khi tự kiểm tra tài nguyên; hard cap 300 MP vẫn giữ.
+- V5 `layers` chỉ nhận **hệ số nguyên `n=1..20`**. `n=1` tách/chỉnh đúng kích thước nguồn, nhẹ nhất
+  và không cần checkpoint super-resolution V3.
+- `n=2..20`: dùng master V3 native x4 cục bộ rồi resample một lần tới đúng kích thước; lần tạo master
+  đầu cần NVIDIA CUDA và đủ ba checkpoint V3. Nếu cần hệ số lẻ/thập phân như x1,5 hoặc x2,5, hãy tách
+  ở x1, review/sửa, flatten rồi giao PNG đó cho `upscale high` hoặc `upscale print`.
+- `--detail exhaustive` là mặc định. V5 Pro không có hard cap layer và không bỏ proposal chỉ để vừa
+  một con số; `--max-layers` cũ chỉ còn tương thích lệnh và không giới hạn engine Pro.
+- `--review gui` mở giao diện cục bộ khi chạy một ảnh. Batch tự dùng `defer`; `defer` và `auto` chỉ
+  lưu checkpoint, không mở giao diện. Tên `strict` cũ còn được parser chấp nhận để tương thích nhưng
+  hiện **không phải chế độ V5 riêng** và không bắt buộc mọi quyết định; đừng dùng nó như bảo chứng QA.
+- `--no-semantic` bỏ nhánh Grounding DINO/SAM/BiRefNet, nhưng inventory hình học/OCR và LayerD vẫn
+  không trở thành bằng chứng tuyệt đối.
+- `poster` ưu tiên nền màu/gradient/hình học; `lama` dùng checkpoint LaMa đã kiểm hash cho texture;
+  `auto` chọn theo ảnh. Mọi phần dưới vật thể đều là tổng hợp.
 
-Bundle nằm trong `OUTPUT\V5_LAYERS` và luôn gồm OpenRaster `.ora`, ZIP PNG/mask, bản xem, layer map,
-contact sheet, OCR JSON và manifest có hash/QA. PSD pixel-layer chỉ được tạo khi mỗi cạnh
-không quá 30.000 px và ước tính dữ liệu layer thô không quá 1,6 GB; V5 không tạo PSB giả.
-ORA + ZIP là bản mở chuẩn khi PSD vượt giới hạn. ZIP chỉ chứa manifest di động, OCR, các RGBA crop
-và mask; nó không đóng gói lặp lại PSD/ORA/preview. OCR chỉ hỗ trợ nhận diện/đặt tên — chữ vẫn là
-raster, không giả thành font.
+### Quy trình layers → review → resume
 
-V5 nhận PNG/JPEG/WebP/BMP/TIFF một khung. Ảnh động và TIFF nhiều trang bị từ chối; alpha nguồn hiện
-được ghép lên nền trắng trước khi suy luận layer để đầu vào chuẩn hóa không mơ hồ.
-Profile sRGB đã chuẩn hóa được nhúng vào mọi PNG màu, PNG màu trong ORA và resource ICC của PSD;
-mask alpha `L` cố ý không gắn profile RGB. V5 mở lại để xác minh profile không bị mất khi xuất.
+```powershell
+# 1. Tạo inventory và bundle x1
+.\upscale layers poster.png 1 --review gui
 
-V5 bảo đảm ảnh ghép lại được kiểm tra từ chính các layer 8-bit đã xuất. Tuy vậy, hãy mở PSD/ORA,
-tắt từng layer và kiểm tra nền ở 100% trước khi sửa file quan trọng. Canva có thể thay đổi khả năng
-nhập PSD; cần thử đúng bundle thật thay vì suy ra từ phần mở rộng.
+# 2. Nếu QA còn REVIEW_REQUIRED, mở lại mà không sửa JSON
+.\upscale review ".\OUTPUT\V5_LAYERS\poster_V5_LAYERS_x1"
 
-Mask V5 dùng chính connected-component SAM đã được chọn cho từng vật thể; bán kính inpaint không được
-biến thành quyền sở hữu layer. Với chữ raster, V5 trừ pixel giống màu panel ở lòng `O/0`, cửa `G/C` và
-khe `N`, phục hồi dấu nhỏ chỉ khi vừa khớp vị trí glyph vừa khớp màu, rồi dùng ViTMatte-S để tạo alpha
-phân số trong topology đã khóa. Khi phóng xN, Lanczos chỉ được dùng trong envelope đúng một pixel nguồn,
-tránh block nearest-neighbour mà không kéo theo đường panel/vật thể kế bên. `manifest.json` kiểm tra alpha
-ngoài vùng cho phép và độ chính xác ghép ảnh độc lập. Alpha x1 đã sạch được khóa làm chuẩn; V5 giải ngược
-đúng thứ tự layer để tìm màu nền/tiền cảnh 8-bit khả thi thay vì tăng alpha làm bít lòng chữ. Gate còn đối
-chiếu đúng vị trí nét và khoảng âm ở ba ngưỡng alpha; lỗi gate thì bundle không được công bố. Đây vẫn là
-raster hữu hạn, không phải SVG/path hay zoom vô cực.
+# 3. Review chỉ lưu checkpoint; chạy lại đúng lệnh để dựng lại PSD/ORA
+.\upscale layers poster.png 1 --review gui
+```
 
-Mở PSD bằng Photoshop/Photopea; mở ORA bằng Krita/GIMP. Với Canva, thử nhập PSD trước; nếu importer
-không giữ đúng hierarchy/alpha, hãy upload từng RGBA trong `LAYERS` và đặt theo `canvas_offset` ở
-`manifest.json`. Preview chỉ để đối chiếu, không phải master chỉnh sửa. Không có tiêu chuẩn nào khôi
-phục được layer graph đã mất từ bitmap phẳng; OpenRaster 0.0.6 chỉ chuẩn hóa cách trao đổi các layer
-được V5 suy luận.
+Checkpoint không tự sửa PSD/ORA cũ. Khi chạy lại, launcher kiểm tra đúng đường dẫn/hash ảnh, hệ số và
+toàn bộ ID proposal; checkpoint khác ảnh hoặc inventory đã thay đổi bị từ chối thay vì áp nhầm. Với batch,
+duyệt từng bundle rồi chạy lại đúng lệnh thư mục; resume được ghép riêng cho từng ảnh.
 
-Quy trình nhẹ nên dùng: chạy V5 `n=1` → sửa PSD/ORA → xuất một PNG đã ghép từ phần mềm chỉnh sửa →
-chạy `upscale high <PNG-đã-sửa> <n>` để lấy ảnh lớn, hoặc `upscale print` để tạo bộ giao in V4.
-Nếu cần chính tài liệu layer ở độ phân giải lớn ngay từ đầu, chạy V5 với `n=4`; file sẽ nặng hơn rõ rệt.
-PSD/ORA V5 là tài liệu raster RGB trung gian, không phải CMYK/PDF-X giao in và không cam kết giữ DPI
-hay khổ vật lý nguồn. Khi giao in, hãy dùng PNG đã sửa với `upscale print ... --width-mm ...` rồi
-preflight theo ICC/yêu cầu của nhà in.
+Canvas review mặc định để ảnh sạch; chọn một dòng trong danh sách thì chỉ vẽ riêng mục đó.
+Bật **Hiện toàn bộ mục chờ duyệt** khi cần xem tổng quan, hoặc **Hiện cả mục kỹ thuật/đã xử lý**
+để kiểm tra toàn bộ proposal ledger. Việc ẩn trên canvas không xóa proposal khỏi checkpoint hay QA.
+
+Nhóm do người dùng tạo trong trang review được xuất thành **group thật** trong cả PSD và ORA, không
+chỉ là nhãn trong JSON. Để không đổi thứ tự ghép ảnh, V5 chỉ cho nhóm các layer có cùng parent trực tiếp
+và đang liền nhau trong thứ tự sibling; chọn khác parent hoặc không liền thứ tự sẽ bị từ chối. Group dùng
+composite pass-through và không gộp các layer thành một bitmap.
+
+V5 cũng tự tạo folder pass-through theo các dải ownership/source liền nhau để tài liệu lớn dễ mở mà
+không gộp leaf, đổi parent, thứ tự hay pixel. Hai bundle K thật đã kiểm định: `sau` có 44 auto-folder
+chứa 999 leaf, root 761 → 7 và tổng sibling 1.018 → 63; `truoc` có 76 auto-folder chứa 881 leaf,
+root 323 → 7 và tổng sibling 910 → 105. Cả hai vẫn là `REVIEW_REQUIRED`: các số này chỉ đo cách tổ
+chức cây tài liệu, không chứng minh layer đã sạch hoặc đúng
+ngữ nghĩa. Group người dùng hợp lệ luôn thắng auto-folder; group cũ không còn cùng parent/liền thứ tự
+sẽ được dissolve an toàn và ghi audit, không bị resume phục hồi lại.
+
+LayerD chạy cục bộ từ source/model đã pin nhưng chỉ cung cấp raw matte và giả thuyết nền. V5 Pro còn đối
+chiếu OCR/QR, DINO, SAM, BiRefNet, connected component, hình học, quan hệ z-order và quyết định người dùng.
+Raw layer LayerD không tự có quyền sở hữu pixel và không được xem là “layer gốc” của thiết kế. Cụm
+không qua policy coherence được tách thành các connected piece nguyên tử, liên hệ bằng review-group ID
+nhưng không gộp pixel; tất cả các node đó chờ duyệt và không move-safe.
+
+Riêng một semantic union sạch có nhiều vùng chạm/che nhau không bị ép tách giả thành các leaf
+“nguyên tử”. Khi chưa có bằng chứng instance độc lập, metadata ghi `atomicity_unverified` và
+`whole_visible_union`. Chỉ bằng chứng độc lập xác nhận `count > 1` mới cho phép nhãn
+`compound_subassembly`; cả hai vẫn chờ duyệt dù toàn union có thể kéo an toàn như một nhóm.
+
+Mask chữ OCR được thử với palette nội vùng và palette vòng nền bên ngoài, rồi qua gate component, dải
+hàng chữ và vật thể nằm kề. Preflight trên alpha xuất cuối còn kiểm lõi chữ tương phản và mảnh rời ngoài
+dải chính; lịch sử hạ cấp đầu tiên được giữ qua mọi lượt kiểm/resume. Chữ/giá có mask lẫn mảng nền,
+nhiều dải bất thường hoặc kéo theo icon/vật thể không được tự xác nhận: node ở trạng thái chờ duyệt và
+không move-safe. OCR vẫn chỉ là bằng chứng cho
+layer raster, không biến chữ thành text object có thể gõ sửa.
+
+### Nền sạch toàn canvas và SOURCE REMAINDER
+
+V5 Pro tách riêng hai trách nhiệm để không đánh đổi nền sạch lấy một preview trông giống nguồn:
+
+- layer nền dưới cùng là clean plate tổng hợp **sạch trên toàn canvas**; pixel nguồn chưa có ownership
+  nhìn thấy không bị âm thầm nướng trở lại nền này;
+- panel/frame/line đã xác nhận dùng bề mặt tham chiếu sạch trên toàn `full_support`. Mọi sai khác RGB và
+  antialias không tái tạo đúng bằng reference bị khoét khỏi `visible_alpha`; geometry residual không có
+  clean reference luôn chờ duyệt và không move-safe;
+- phần bù của ownership `visible_alpha`, gồm cả các sai khác geometry vừa khoét, được giữ nguyên trong
+  layer **ở trên cùng** `REVIEW - SOURCE REMAINDER (hide to reveal clean background)`. Layer này có thể
+  chứa cả vùng nguồn yên/ít tương phản để phép tái ghép ở x1 hoặc trên master xN vẫn bám đúng
+  nguồn/master của lượt chạy.
+
+Giữ layer `SOURCE REMAINDER` **hiện** khi cần diện mạo nguyên bản để đối chiếu, scale hoặc tiếp tục sửa.
+**Ẩn** layer đó để lộ clean background toàn canvas. Đây là layer an toàn giữ pixel, không phải một vật
+thể semantic, không được xem là move-safe và không nên kéo đi như logo/chữ/sản phẩm. Nó cố ý mang trạng
+thái unresolved/`REVIEW_REQUIRED`; sự hiện diện của nó nói rằng các pixel ấy **chưa được tách semantic**,
+không phải bằng chứng V5 đã tìm lại được layer gốc.
+
+QA là fail-closed:
+
+- `PASS`: không còn proposal/node chờ; ownership không chồng; alpha không thoát semantic envelope;
+  clean plate, recomposition và round-trip container đạt các gate đã khai báo.
+- `REVIEW_REQUIRED`: không có lỗi cứng nhưng vẫn còn vùng/node chưa xác nhận — gồm `SOURCE REMAINDER`,
+  geometry thiếu clean reference hoặc text mask chưa đủ tinh khiết — OCR còn sót ở nền hoặc clean-plate
+  audit chưa đủ bằng chứng. Đây là kết quả bình thường cần người dùng duyệt, không phải lỗi treo.
+- `FAIL`: có lỗi cứng như ownership chồng, alpha vượt envelope, layer rỗng, clean plate/container lỗi,
+  sai số tái ghép vượt ngưỡng, hoặc node vẫn tự nhận `auto_confirmed`/move-safe dù metadata ghi semantic
+  refinement, geometry-cleanliness, text-purity hay policy cụm LayerD đã từ chối. QA đọc topology từ
+  `full_support` thật sẽ xuất: frame phải có vòng/lỗ trong trội, panel phải đặc và line không được lẫn
+  cấu trúc lớn theo trục vuông góc.
+
+`REVIEW_REQUIRED` vẫn được publish vào `OUTPUT\V5_LAYERS` để người dùng mở review và chạy resume.
+`FAIL` là lỗi QA cứng: staging **không được publish** và không thay bundle tốt trước đó. Sự tồn tại của
+`03_*_PREVIEW.png`, hay ảnh ghép gần giống nguồn, không phải giấy chứng nhận hoàn tất decomposition.
+
+Mỗi bundle trong `OUTPUT\V5_LAYERS` gồm:
+
+```text
+00_HUONG_DAN_MO_FILE.txt
+01_<ten>_EDITABLE.psd          có khi nằm trong giới hạn PSD
+02_<ten>_MASTER.ora            OpenRaster 0.0.6
+03_<ten>_PREVIEW.png           chỉ để đối chiếu
+04_<ten>_CLEAN_BACKGROUND.png  clean plate tổng hợp sạch toàn canvas
+05_<ten>_LAYERS.zip            layer/mask + inventory/QA di động
+06_<ten>_CONTACT_SHEET.png     sheet đơn hoặc cover cho bộ sheet nhiều trang
+CONTACT_SHEETS\page_*.png      chỉ có khi cần phân trang
+LAYERS\  MASKS\  ELEMENT_INVENTORY.csv/json  manifest.json  _KY_THUAT\
+```
+
+Job nhỏ vẫn chỉ có một contact sheet. Job lớn dùng tối đa 32 card/trang; cover và từng page bị chặn ở
+4.096 px/cạnh và 16 MP để không sinh ảnh xem trước khổng lồ. Các page nằm trong outer manifest của
+bundle; nội dung `05_*_LAYERS.zip` không đổi và không nhét thêm bộ contact-sheet phân trang.
+
+PSD/ORA và thư mục `LAYERS` cũng chứa `SOURCE REMAINDER` như một layer review thật. Preview mặc định
+giữ nó hiện để bảo toàn diện mạo nguồn/master; file `04_*_CLEAN_BACKGROUND.png` là nền sạch khi layer
+review này bị ẩn, không phải ảnh nguồn được đổi tên.
+
+PSD chỉ được tạo khi canvas không quá 30.000 px/cạnh và dự toán dữ liệu layer thô không quá 1,6 GB;
+V5 không ghi PSD dưới đuôi PSB giả. ORA cùng PNG/mask là đường mở chuẩn khi PSD không phù hợp. Chữ OCR
+vẫn là pixel raster, không tự biến thành font hay text object Canva.
+
+Quy trình nhẹ được khuyến nghị: V5 `n=1` → review → sửa PSD/ORA → xuất PNG ghép từ phần mềm chỉnh sửa →
+`upscale high <PNG-đã-sửa> <n>` để làm lớn, hoặc `upscale print <PNG-đã-sửa> <n> --width-mm ...` để tạo
+bộ giao in V4. V5 là tài liệu RGB raster trung gian, không phải CMYK/PDF-X và không bảo đảm DPI/khổ vật lý.
+
+Không model hay tiêu chuẩn trao đổi nào tìm lại được pixel bị che hoặc layer graph đã bị flatten.
+`PASS` mô tả gate của pipeline hiện tại, không phải “99,99% chính xác”, zoom vô cực hay khôi phục file gốc.
 
 ## Lệnh V7 Design Repair
 
@@ -380,11 +504,13 @@ vài GB; máy không NVIDIA tự nhận bản PyTorch CPU:
 .\APP\engines\V5\setup_v5.ps1 -CheckOnly -SkipTesseract
 ```
 
-Setup tải snapshot SAM 2.1/Grounding DINO đã pin, checkpoint LaMa đã kiểm SHA-256 và model
-`vie.traineddata` đã pin. Nếu thiếu Tesseract 5, setup dùng WinGet cài đúng gói Windows đã khóa;
-máy bị hạn chế cài phần mềm có thể chủ động dùng `-SkipTesseract`, khi đó V5 vẫn chạy bằng SAM/DINO,
-bỏ qua vùng OCR và ghi trạng thái vào manifest. Lượt `-CheckOnly` sau đó cũng phải mang cờ
-`-SkipTesseract`. Không model hay output lớn nào được commit lên Git.
+Setup tải và kiểm hash năm snapshot đã pin: BiRefNet HR-matting, LayerD BiRefNet, SAM 2.1,
+Grounding DINO và ViTMatte-S compatibility; đồng thời kiểm checkpoint LaMa cùng `vie.traineddata`.
+Đường V5 Pro dùng BiRefNet/LayerD/SAM/DINO; ViTMatte-S vẫn được setup giữ cho tương thích engine V5
+trước đó, không phải quyền quyết định decomposition Pro. Nếu thiếu Tesseract 5, setup dùng WinGet cài
+gói Windows đã khóa; máy hạn chế cài phần mềm có thể chủ động dùng `-SkipTesseract`, khi đó V5 vẫn chạy
+nhưng OCR không khả dụng và trạng thái đó được ghi vào manifest. Lượt `-CheckOnly` sau đó cũng phải mang
+cờ `-SkipTesseract`. Không model hay output lớn nào được commit lên Git.
 
 V7 không bao giờ dùng model English rồi ghi nhãn giả là phiếu tiếng Việt. Nếu thiếu file
 `V7\models\tessdata\vie.traineddata` đã kiểm tra, Tesseract được đánh dấu không khả dụng và không thể
@@ -418,14 +544,14 @@ OUTPUT/V2_FAST/           PNG V2
 OUTPUT/V3_HIGH/           PNG V3
 OUTPUT/V4_PRINT/          bundle V4 Print SVG/PDF-X-4/PNG
 OUTPUT/V4_VECTOR/         bundle toàn vector cho artwork phẳng
-OUTPUT/V5_LAYERS/         bundle PSD/ORA/PNG-mask V5
+OUTPUT/V5_LAYERS/         bundle V5 Pro PSD/ORA/PNG-mask + review/QA
 OUTPUT/V7_REPAIR/         bundle V7 phục dựng raster + chữ editable + duyệt/QA
 APP/
   upscale_cli.py          bộ điều phối một ảnh và cả thư mục
   engines/V2/             V2 Fast
   engines/V3/             V3 High và kiểm thử
   engines/V4/             V4 Print, export PDF/X-4 và kiểm thử
-  engines/V5/             tách layer, tái tạo nền, PSD/ORA và kiểm thử
+  engines/V5/             V5 Pro inventory/ownership/review/clean plate, PSD/ORA và kiểm thử
   engines/V7/             phục dựng raster, OCR/duyệt, sửa chữ và SVG text editable
   manifests/              báo cáo kỹ thuật cục bộ
   masters/                master/cache render cục bộ, có thể tái tạo, không đưa lên Git
@@ -467,13 +593,21 @@ finally {
 ## Kiểm thử V5
 
 ```powershell
-& .\APP\engines\V3\.venv\Scripts\python.exe -B -m unittest discover `
-  -s APP\engines\V5\tests -p "test_*.py" -v
+Push-Location .\APP\engines\V5
+try {
+  & ..\V3\.venv\Scripts\python.exe -B -m unittest discover `
+    -s tests -p "test_*.py" -v
+  if ($LASTEXITCODE -ne 0) { throw "V5 tests failed." }
+}
+finally {
+  Pop-Location
+}
 .\APP\engines\V5\setup_v5.ps1 -CheckOnly
 ```
 
-Checklist phát hành còn phải chạy một ảnh thật, mở lại PSD, validate ORA 0.0.6, so ảnh tái ghép
-với preview và kiểm tra nền khi tắt/move từng group cha–con.
+Checklist phát hành V5 Pro còn phải chạy một ảnh thật, duyệt/resume checkpoint, mở lại PSD,
+validate ORA 0.0.6, kiểm proposal accounting/ownership/clean plate và xác nhận trạng thái QA không bị
+nâng từ `REVIEW_REQUIRED`/`FAIL` chỉ vì preview tái ghép gần giống nguồn.
 
 ## Kiểm thử V7
 
@@ -496,7 +630,7 @@ PNG/SVG/manifest và trạng thái QA. Trước khi dùng cho
 - [G'MIC](https://gmic.eu/), [VTracer](https://github.com/visioncortex/vtracer), [resvg](https://github.com/linebender/resvg)
 - [Scribus](https://www.scribus.net/) và [pikepdf](https://github.com/pikepdf/pikepdf)
 - [ISO 15930-7 (PDF/X-4)](https://www.iso.org/standard/55843.html), [PDF Association: yêu cầu PDF/X](https://pdfa.org/technical-side-and-requirements-of-pdfx/), [GWG Sign & Display](https://gwg.org/sign-display/) và [W3C SVG 2 Embedded Content](https://www.w3.org/TR/SVG/embedded.html)
-- [SAM 2 chính thức](https://github.com/facebookresearch/sam2), [Grounding DINO chính thức](https://github.com/IDEA-Research/GroundingDINO), [Tesseract OCR](https://github.com/tesseract-ocr/tesseract), [LaMa chính thức](https://github.com/advimman/lama) và [OpenRaster](https://www.openraster.org/baseline/layer-stack-spec.html)
+- [LayerD](https://github.com/CyberAgentAILab/LayerD), [SAM 2 chính thức](https://github.com/facebookresearch/sam2), [Grounding DINO chính thức](https://github.com/IDEA-Research/GroundingDINO), [BiRefNet HR-matting](https://huggingface.co/ZhengPeng7/BiRefNet_HR-matting), [Tesseract OCR](https://github.com/tesseract-ocr/tesseract), [LaMa chính thức](https://github.com/advimman/lama) và [OpenRaster](https://www.openraster.org/baseline/layer-stack-spec.html)
 - [PaddleOCR/PP-OCRv6](https://github.com/PaddlePaddle/PaddleOCR), [Unicode NFC/UAX #15](https://unicode.org/reports/tr15/), [HarfBuzz](https://harfbuzz.github.io/) và [OpenType](https://learn.microsoft.com/en-us/typography/opentype/spec/)
 
 Chi tiết phiên bản và giấy phép nằm trong `APP\engines`, `APP\engines\V4\SOURCES.md`,

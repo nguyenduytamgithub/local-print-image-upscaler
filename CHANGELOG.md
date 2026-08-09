@@ -3,6 +3,86 @@
 Các thay đổi đáng chú ý của Local Print Image Upscaler được ghi tại đây. Dự án dùng
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-09
+
+### Added
+
+- Nâng `upscale layers` thành V5 Pro với sổ kiểm kê proposal đầy đủ: OCR/QR/hình học, Grounding DINO,
+  SAM 2.1, BiRefNet HR-matting và LayerD đều để lại bằng chứng; mỗi proposal phải được gán owner,
+  từ chối kèm lý do hoặc giữ ở trạng thái chờ duyệt.
+- Tích hợp source LayerD đã vendored tại upstream commit
+  `21aef937a0371614adb4d961f52d02409cb8ecc7` và model
+  `cyberagent/layerd-birefnet` revision `679f743cd001fb5d6360e59e8e1904678c5fa734`, có kiểm
+  SHA-256. LayerD chỉ tạo đề xuất matte/nền phụ trợ; ownership cuối vẫn qua kiểm kê độc lập, fusion,
+  duyệt người dùng và QA, không xuất mù kết quả LayerD.
+- Thêm giao diện duyệt layer cục bộ bằng `upscale review <bundle>`/`duyet`: checkpoint ghi ngay trong
+  `_KY_THUAT\LAYER_REVIEW.json`, không yêu cầu người dùng sửa JSON thủ công.
+- Canvas duyệt mặc định sạch và chỉ hiện mục đang chọn; có checkbox riêng cho toàn bộ mục
+  chờ duyệt và checkbox kỹ thuật cho toàn bộ ledger. Mục bị lọc khỏi canvas không bị xóa khỏi checkpoint/QA.
+- Nhóm được tạo trong giao diện review nay xuất thành group pass-through thật trong PSD/ORA; chỉ các
+  layer cùng parent trực tiếp và liền nhau trong thứ tự sibling được nhóm để composite không thay đổi.
+- Thêm folder pass-through tự động theo các dải ownership/source liền nhau mà không gộp leaf, đổi
+  hierarchy, thứ tự hay pixel. Hai bundle K thật đã kiểm định: `sau` có 44 auto-folder/999 leaf,
+  root 761 → 7, sibling 1.018 → 63; `truoc` có 76 auto-folder/881 leaf, root 323 → 7, sibling
+  910 → 105. Cả hai vẫn `REVIEW_REQUIRED`; đây là số đo tổ chức cây, không chứng minh layer sạch hoặc
+  đúng ngữ nghĩa. Group người dùng hợp lệ thắng
+  auto; group cũ không còn an toàn được dissolve có audit.
+- Thêm resume an toàn: sau khi duyệt, chạy lại đúng lệnh `layers`; launcher chỉ nạp checkpoint khi đường
+  dẫn/hash ảnh, hệ số và toàn bộ proposal ledger còn khớp. Checkpoint khác ảnh hoặc inventory khác bị từ chối.
+- Thêm clean plate có kiểm tra ghost/seam, ownership độc quyền, semantic envelope, proposal accounting,
+  OCR còn sót ở nền, recomposition và round-trip PSD/ORA. Báo cáo dùng ba trạng thái chính xác
+  `PASS`, `REVIEW_REQUIRED` và `FAIL`.
+- Thêm kiến trúc nền hai lớp: clean plate tổng hợp sạch trên toàn canvas và layer
+  **ở trên cùng** `REVIEW - SOURCE REMAINDER (hide to reveal clean background)` giữ nguyên phần bù của
+  ownership nhìn thấy — gồm cả sai khác RGB/antialias bị khoét khỏi geometry sạch — để preview/scale
+  vẫn tái ghép đúng theo lượt chạy.
+- Xuất bundle V5 Pro dễ mở gồm hướng dẫn, PSD khi trong giới hạn, OpenRaster 0.0.6, preview, nền sạch,
+  ZIP layer/mask, contact sheet, inventory CSV/JSON và bộ QA trong `_KY_THUAT`.
+- Contact sheet lớn được phân trang thành cover và `CONTACT_SHEETS/page_*.png`: tối đa 32 card/trang,
+  4.096 px/cạnh và 16 MP mỗi ảnh. Job nhỏ giữ một file; page có trong outer manifest còn ZIP layer giữ
+  nguyên contract cũ.
+
+### Changed
+
+- V5 Pro bỏ hard cap layer: các crop được stream theo vùng chặt và không proposal nào bị bỏ chỉ để vừa
+  một con số. Tùy chọn `--max-layers` cũ chỉ còn tương thích lệnh, không giới hạn engine Pro.
+- Cụm residual LayerD không qua policy coherence/an toàn không còn bị union thành một layer dễ kéo dính:
+  từng connected piece được xuất thành node nguyên tử riêng, `unresolved`, không move-safe và chỉ liên hệ
+  bằng review-group ID. Cụm đạt policy mới được phép hợp nhất/tự xác nhận.
+- Semantic candidate có `refinement.accepted=false` hoặc loại nhãn mâu thuẫn luôn chờ duyệt và không
+  move-safe, kể cả khi confidence cao hoặc fallback mask vẫn dùng được để kiểm tra.
+- Semantic product union sạch nhưng thiếu bằng chứng instance độc lập được ghi
+  `atomicity_unverified`/`whole_visible_union`; chỉ bằng chứng độc lập xác nhận `count > 1` mới ghi
+  `compound_subassembly`. Cả hai có thể move-safe như toàn union nhưng vẫn unresolved, không
+  auto-confirmed/auto-atomic và không bịa ranh giới bị che; UI giải thích lý do theo từng node.
+- Panel/frame/line dùng reference sạch trên toàn `full_support`; mọi source deviation được chuyển sang
+  top `SOURCE REMAINDER`. Geometry residual thiếu reference đã kiểm chứng luôn unresolved/non-move-safe.
+- Frame canonical dùng lỗ trong trội cùng bằng chứng sạch cạnh bên/đáy để dựng topology thẳng, khép kín
+  và loại ribbon/chữ dính contour. QA kiểm `full_support` xuất thật: frame phải là vòng có lỗ trong trội,
+  panel phải đặc, line không được lẫn cấu trúc lớn theo trục vuông góc.
+- OCR text/price thử palette nội vùng và vòng nền ngoài, rồi kiểm component, dải hàng và vật thể kề.
+  Preflight trên alpha xuất cuối kiểm thêm lõi chữ tương phản và mảnh rời ngoài dải chính; lịch sử
+  `before-first-gate`/`first-downgrade` được giữ idempotent qua nhiều lượt kiểm và resume. Mask không
+  tinh khiết bị fail-closed thay vì tự nhận move-safe.
+- Launcher dọn staging V5 bị bỏ dở chỉ khi đã giữ job lock và tên khớp chính xác
+  `.TARGET.new-<32-hex>`; junction/symlink/reparse point bị từ chối và output tốt không bị đụng tới.
+- `n=1` trở thành master chỉnh sửa được khuyến nghị. Sau khi duyệt/sửa PSD hoặc ORA, xuất PNG ghép rồi
+  dùng `upscale high` để làm lớn hoặc `upscale print` để tạo bundle giao in; V5 không giả là PDF/X/CMYK.
+- V5 `layers` chốt hệ số nguyên `n=1..20`; nhu cầu hệ số lẻ/thập phân đi theo quy trình V5 x1 →
+  review/sửa → flatten → `upscale high` hoặc `upscale print`.
+- Cơ chế fail-closed không coi preview ghép khớp là đủ: QA coi việc node tự nhận `auto_confirmed`/
+  move-safe trái với bằng chứng refinement/policy bị từ chối là lỗi cứng. Bundle `REVIEW_REQUIRED` vẫn
+  được publish để duyệt/chẩn đoán; hard QA `FAIL` bị launcher chặn trước publish và không thay bundle tốt
+  trước đó.
+- `--review strict` không được mô tả như chế độ V5 bắt buộc quyết định: tên cũ chỉ còn tương thích
+  parser và hiện không có hành vi riêng; tài liệu dùng `gui`, `defer` và `auto` đúng theo runtime.
+- `SOURCE REMAINDER` cố ý là node unknown, không move-safe và unresolved: giữ hiện để bảo toàn diện mạo
+  nguồn/master, ẩn để lộ nền/panel/frame/line sạch. Đây là lớp an toàn giữ pixel ở trên cùng, không được
+  quảng cáo là tách semantic. `REVIEW_REQUIRED` vì vậy là trạng thái bình thường cần duyệt, không phải lỗi.
+- Tài liệu và manifest gọi rõ pixel bị che là phần tổng hợp, layer graph là suy luận và chữ OCR vẫn là
+  raster; không tuyên bố phần trăm chính xác tuyệt đối hay khôi phục file thiết kế gốc.
+- Phiên bản ứng dụng tăng lên `0.5.0`; V2/V3/V4/V7 được giữ nguyên.
+
 ## [0.4.0] - 2026-08-04
 
 ### Added
@@ -68,7 +148,7 @@ Các thay đổi đáng chú ý của Local Print Image Upscaler được ghi t�
 ### Added
 
 - Thêm `upscale layers` (V5 Smart Layers) để suy luận một số lượng hữu hạn layer raster hữu ích từ
-  PNG/JPEG/TIFF/WebP/BMP phẳng; hỗ trợ một ảnh hoặc batch cả thư mục, cùng hệ số `n=1..20`.
+  PNG/JPEG/TIFF/WebP/BMP phẳng; hỗ trợ một ảnh hoặc batch cả thư mục, cùng hệ số nguyên `n=1..20`.
 - Phân luồng poster/đồ họa và ảnh tự nhiên: SAM 2.1 sinh đề xuất mask; poster được gộp theo panel,
   hàng, quan hệ cha–con và hình học, còn ảnh nhiều texture dùng chiến lược nhóm bảo thủ riêng.
 - Thêm Grounding DINO làm nhãn gợi ý và Tesseract với model `tessdata_best` tiếng Việt đã pin để lấy

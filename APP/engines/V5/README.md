@@ -1,257 +1,340 @@
-# V5 Smart Editable Layers
+# V5 Pro — reviewable raster layer reconstruction
 
-V5 turns one flat bitmap into a deliberately small set of **real raster layers**.
-It combines official SAM 2.1 masks, Grounding DINO semantic hints, Tesseract
-line geometry, deterministic grouping, pinned ViTMatte-S text-edge refinement
-and background reconstruction. It is separate from V2, V3 and V4 and does not
-modify their code or outputs.
+V5 Pro reconstructs one flattened bitmap as an inferred hierarchy of real
+raster layers. It is designed for local poster/graphic editing, not for
+recovering the original PSD. A flat PNG or JPEG contains neither the discarded
+layer graph nor pixels hidden behind visible objects; V5 therefore labels the
+clean background as synthesized and never claims a perfect-recovery rate.
 
-V5 classifies poster/graphic content separately from photographic or textured
-content. Poster masks are grouped into panels, rows, objects and parent-child
-stacks instead of hundreds of tiny fragments. Photographic content follows a
-more conservative SAM/OCR/DINO selection path. The result is an inferred edit
-structure, not the original layer graph that was discarded when the source was
-flattened.
+The active public engine is `layer_engine_v5_pro.py`. It combines an independent
+element inventory, semantic proposals, geometric reconstruction, LayerD
+proposals, ownership arbitration, local review, clean-plate synthesis and
+fail-closed QA. V2, V3, V4 and V7 remain separate.
 
-## Run
+## Recommended workflow
 
-From the `RESIZE` root:
+Run these commands from the `RESIZE` root:
 
 ```powershell
-# Source-resolution layers: recommended for editing
-.\upscale layers poster.png 1
+# Install once, then verify the pinned local runtime
+.\APP\engines\V5\setup_v5.ps1
+.\APP\engines\V5\setup_v5.ps1 -CheckOnly
 
-# AI-sharpened x4 layers: requires the existing V3 model set
-.\upscale layers poster.png 4
+# 1. Build the source-resolution editing master
+.\upscale layers poster.png 1 --review gui
 
-# Process every supported image in a directory
-.\upscale layers "D:\BO ANH" 1
+# 2. Reopen review later if QA still says REVIEW_REQUIRED
+.\upscale review ".\OUTPUT\V5_LAYERS\poster_V5_LAYERS_x1"
 
-# The same scale and options are applied to every image in a batch
-.\upscale layers "D:\BO ANH" 4 --max-layers 20
+# 3. Review saves a checkpoint; rerun the same layers command to rebuild outputs
+.\upscale layers poster.png 1 --review gui
 ```
 
-Optional expert controls:
+The `review`/`duyet` command never rewrites the existing PSD or ORA. It writes
+each decision to `_KY_THUAT\LAYER_REVIEW.json`. On the next `layers` run, the
+launcher resumes only when the original path/hash, scale and complete proposal
+ID ledger still match. A checkpoint from another image or a changed inventory
+is rejected instead of being applied approximately.
+
+Groups created in the review UI are exported as real pass-through groups in
+both PSD and ORA. To preserve the bottom-to-top composite, V5 accepts a review
+group only when all selected layers share the same immediate parent and occupy
+one contiguous run in sibling order. A cross-parent or non-contiguous selection
+is rejected rather than silently reordering artwork; grouping does not flatten
+the member layers.
+
+V5 also creates deterministic pass-through organizational folders over broad,
+contiguous ownership/source runs. They never merge leaves or change hierarchy,
+mask, pixels or bottom-to-top order. The two audited K bundles report: `sau`, 44
+automatic folders over 999 leaves, root entries 761 to 7 and total sibling entries
+1,018 to 63; `truoc`, 76 folders over 881 leaves, root entries 323 to 7 and total
+sibling entries 910 to 105. Both remain `REVIEW_REQUIRED`: these figures measure
+document-tree organization only and do not prove clean or semantically correct
+layer decomposition. A valid explicit user group has precedence. If a later
+hierarchy makes an old user group unsafe (different immediate parents or a
+non-contiguous run), V5 dissolves
+only that container, records the reason and leaves its atomic members ungrouped;
+resume cannot resurrect it.
+
+The review canvas initially stays clean; selecting a list row draws only that
+item. Enable **Hiện toàn bộ mục chờ duyệt** for the unresolved overview,
+or **Hiện cả mục kỹ thuật/đã xử lý** to inspect the complete ledger.
+These are display filters: hidden items remain in the checkpoint, proposal
+accounting and QA.
+
+After review and manual editing, flatten the edited PSD/ORA to a PNG and upscale
+that finished composition:
 
 ```powershell
-.\upscale layers poster.png 1 --max-layers 20 --inpaint poster --no-semantic
+.\upscale high edited.png 4
+
+# Or create the V4 print-delivery bundle with physical size and printer profile
+.\upscale print edited.png 4 --width-mm 3000
 ```
 
-- `--max-layers 4..60`: foreground-layer usability budget; default 24. The
-  synthesized background is one additional layer.
-- `--inpaint auto|poster|lama`: deterministic colour/gradient fill for artwork,
-  or LaMa for photographic texture. `auto` chooses conservatively.
-- `--no-semantic`: skip Grounding DINO and group with SAM/OCR geometry only.
-- `--allow-huge`: pass the 120 MP warning after checking resources; the 300 MP
-  V5 hard cap still applies.
+This `V5 x1 -> review -> edit -> flatten -> upscale` path keeps the editable
+document manageable. Run V5 directly at x4 only when the layered canvas itself
+must already be large:
 
-The public scale range is `1 <= n <= 20` and decimal factors are accepted. At
-`n=1`, segmentation and editing stay at source resolution. At `n>1`, V5 uses
-the audited local V3 native-x4 AI master and resamples once to the requested
-final size; all three V3 checkpoint files must therefore be installed.
+```powershell
+.\upscale layers poster.png 4 --review gui
+```
 
-For a lightweight editing workflow, run V5 at `n=1`, edit the PSD/ORA, export
-a flattened PNG from the editor, then run `upscale high <edited.png> <n>` or
-`upscale print <edited.png> <n>` for final delivery. Use V5 at `n=4` when the
-editable document itself must already have a large pixel canvas.
+V5 `layers` accepts integer factors only: `n=1..20`. At `n=1`, V5 does not
+require the V3 super-resolution checkpoints. At integer `n=2..20`, the launcher
+uses the audited local V3 native-x4 master and resamples once to the requested
+delivery size. Creating that V3 master for the first time needs NVIDIA CUDA and
+all three local V3 checkpoints. For a fractional target such as x1.5 or x2.5,
+build/review/edit V5 at x1, flatten the edited document, then pass that PNG to
+`upscale high` or `upscale print`.
 
-V5 preserves the requested pixel dimensions, not the source document's
-physical size/DPI contract. Its PSD/ORA files are RGB raster editing
-intermediates, not CMYK or PDF/X print deliverables. After editing, export a
-flattened PNG and use `upscale print ... --width-mm ...` to build the V4 print
-bundle, then preflight it against the printer's ICC/profile requirements.
+## Command surface
 
-Supported inputs are single-frame PNG, JPEG, WebP, BMP and TIFF. Animated or
-multi-page files are rejected. Source alpha is currently composited onto white
-before layer inference so the normalized input is unambiguous.
+```text
+.\upscale layers <image-or-directory> <n>
+                  [--detail exhaustive|grouped]
+                  [--review gui|defer|auto]
+                  [--inpaint auto|poster|lama]
+                  [--no-semantic] [--allow-huge]
 
-## Model roles
+.\upscale review <bundle-or-LAYER_REVIEW.json>
+.\upscale duyet  <bundle-or-LAYER_REVIEW.json>
+```
 
-- **SAM 2.1 Base+** proposes pixel regions. It does not know the original PSD
-  hierarchy.
-- **Grounding DINO Tiny** supplies semantic boxes/labels. Poster geometry still
-  determines pixel boundaries; DINO labels are not trusted as masks.
-- **Tesseract 5 + pinned `tessdata_best` `vie`** supplies Vietnamese line boxes
-  and OCR metadata. Recognition never creates native text objects.
-- **Pinned ViTMatte-S Composition-1k** estimates fractional alpha only along
-  already-clean raster-text boundaries. Deterministic colour/topology rules,
-  not ViTMatte, own counters, apertures, accents and the outer silhouette.
-- **LaMa** fills plausible photographic texture only when selected. Poster
-  mode instead favors deterministic colour, gradient and structural fill.
+- The public V5 scale range is the integer set `n=1..20`; decimal/fractional
+  factors are rejected by the `layers` workflow.
+- `--detail exhaustive` is the production default. V5 Pro maintains exhaustive
+  proposal accounting in both accepted detail modes and does not truncate the
+  document to a hard layer count.
+- Legacy `--max-layers` input remains parser-compatible but is ignored by the
+  Pro resource plan and engine. It must not be used as a completeness claim.
+- `--review gui` opens the local interface for one image. Directory jobs convert
+  GUI review to `defer` so they do not open many windows.
+- `defer` and `auto` write a checkpoint without opening the UI. The legacy
+  `strict` spelling remains parser-compatible but currently has no distinct V5
+  behaviour and does not force a decision for every node. Use `gui`, `defer` or
+  `auto` to describe the supported behaviour; unresolved records still produce
+  `REVIEW_REQUIRED`.
+- `--inpaint poster` favors deterministic colour/gradient/structure fitting;
+  `lama` uses the verified local LaMa checkpoint for texture; `auto` selects a
+  path from observed image characteristics.
+- `--no-semantic` disables the DINO/SAM/BiRefNet semantic branch. It does not
+  turn LayerD or OCR into ground truth.
+- `--allow-huge` passes the 120 MP warning only after resource checks; the 300 MP
+  output hard cap remains.
 
-The manifest records the exact model revisions, device, selected content path,
-grouping policy and background-restoration policy used for each image.
-The normalized sRGB profile is embedded byte-for-byte in every RGB/RGBA PNG,
-all colour PNG members of the ORA and the PSD document ICC resource. Linear
-`L` alpha masks intentionally remain untagged because an RGB profile does not
-describe alpha values.
+For a directory, every image uses the same scale/options and runs sequentially:
 
-## Clean-matte delivery policy
+```powershell
+.\upscale layers "D:\BO ANH" 1 --review defer
+```
 
-V5 separates **proposal area** from **editable ownership**. Colour-guided halo
-expansion and the wider inpainting work radius may help grouping/restoration,
-but neither is allowed to enlarge an exported object alpha. For object-like
-layers, V5 resolves the exact recorded `sam_NNNN_cc_NNN` connected components
-from the original SAM output and discards unanchored islands. Raster text keeps
-separate Vietnamese accents while rejecting long panel/frame rules and isolated
-specks. The renderer then clips every non-zero alpha pixel to the final semantic
-ownership map; shadows or neighbouring artwork outside it stay on the lower
-layer instead of travelling with the object.
+Review each bundle, then rerun the same directory command. Resume matching is
+performed separately for every source image.
 
-Raster text receives a second, deterministic negative-space pass before any
-neural matting. V5 estimates the local panel/background colour in CIE Lab from
-a ring around the text proposal, preserves background-distant source-ink cores,
-and subtracts panel-coloured proposal pixels even when they lie inside one
-connected SAM/OCR region. This opens O/0 counters, G/C apertures and the
-negative spaces around N-like diagonal strokes instead of blindly filling every
-hole. If the colour evidence is weak or the proposed removal is excessive, V5
-falls back to the conservative text mask rather than deleting uncertain ink.
+## What each backend is allowed to do
 
-Detached Vietnamese marks need the opposite protection. V5 may restore a
-compact source-colour component missed by the proposal only when it aligns
-above or below a glyph-sized anchor and its Lab colour agrees with that anchor.
-Long panel rules, remote specks and colour-mismatched fragments are ineligible;
-the manifest records recovered accent components and protected-source-ink
-recall.
+1. OpenCV/Tesseract inventory records text, QR, frames, rules and other edge
+   islands. OCR supplies geometry/metadata; recognized text remains raster.
+   Text extraction compares interior and outside-ring background palettes, then
+   applies component, row-band and adjacent-object purity gates. An impure text
+   or price mask is unresolved and non-move-safe, never silently auto-confirmed.
+2. Grounding DINO proposes semantic boxes. SAM 2.1 supplies box-prompted masks,
+   and BiRefNet HR-matting can refine accepted product boundaries. An explicit
+   failed refinement may retain a bounded fallback mask for review, but that
+   node is always unresolved and non-move-safe; confidence cannot auto-confirm it.
+   A clean product union without independent instance evidence is labeled
+   `atomicity_unverified`/`whole_visible_union`. `compound_subassembly` is used
+   only when independent instance evidence explicitly reports `count > 1`.
+   Either union may remain move-safe as the whole visible group, but is unresolved,
+   never auto-confirmed/auto-atomic. V5 does not invent hidden boundaries between
+   touching/occluded items. The review UI exposes this as a friendly per-node
+   explanation rather than requiring users to inspect raw metadata.
+3. Deterministic geometry reconstructs a frame only from a dominant interior
+   hole plus clean side/bottom evidence, producing canonical straight, closed
+   topology. Attached ribbon/text is rejected from the frame authority; an
+   uncertain candidate remains unresolved. Lines and panels follow their own
+   shape evidence while higher-priority content remains protected.
+4. The pinned LayerD source/model generates raw foreground mattes and a candidate
+   background. These are proposals only. V5 subtracts higher-priority owners and
+   records every component in the ledger. A cluster that fails the coherence/
+   auto-safety policy is never exported as one contaminated union: its final
+   connected pieces become separate atomic unresolved, non-move-safe nodes. A
+   review-group ID records their relationship without merging their pixels.
+5. Ownership arbitration ensures one visible pixel does not silently belong to
+   multiple exported elements. Ambiguous nodes/proposals remain reviewable.
+6. Clean-plate synthesis removes accepted layer footprints, audits ghost/seam
+   risk and runs source-resolution OCR on the proposed lower background.
+7. Export/QA reopens PSD/ORA, checks the actual 8-bit stack and writes a
+   machine-readable status for the launcher's publish guard.
 
-Only after that topology is fixed does V5 run
-`hustvl/vitmatte-small-composition-1k` at revision
-`53222614392e8bd24ed804fbd2f9a43c46ac3850`, with verified
-`model.safetensors` SHA-256
-`BDA9289DB1BB6762D978B42D1C62AE3F34DAF7497171A347A1D09657EFD788CB`.
-ViTMatte-S receives a narrow trimap for each text crop. Sure-foreground ink and
-all removed negative space are hard constraints, and its result is clipped back
-inside the clean source topology. It can estimate fractional pixel coverage;
-it cannot refill an O, close a G, invent a remote component or change wording.
-CUDA is used when available, including the supported RTX 3060 path; otherwise
-the same pinned model runs on CPU more slowly. No artwork or inference request
-is sent to a model service.
+LayerD is an active local runtime dependency, but it is never the sole authority
+for final layer count, masks, hierarchy or background. A broad LayerD region is
+not proof that the design originally had that layer, and a missing LayerD region
+is not proof that a small detail should be discarded. Only a cluster that passes
+the recorded policy may be consolidated and auto-confirmed.
 
-Before resizing or export, V5 also renders an exact x1 stack and audits the
-alpha that the colour-recomposition solver will actually publish. A lone
-high-alpha text pixel is reassigned to its parent only when its source matte is
-low, local Lab evidence matches the surrounding background, and it does not
-match a reliable glyph-body palette. The stack is then rebuilt and checked
-again. This closes the gap between a clean model matte and the final PNG/PSD
-alpha while protecting punctuation and Vietnamese marks; automatic removal is
-hard-capped at two pixels per layer and is recorded in `manifest.json`.
+## Clean full-canvas background and source remainder
 
-At `n>1`, the fractional source matte is resampled with Lanczos and restricted
-to a one-source-pixel antialias envelope around the same topology. This avoids
-nearest-neighbour x4 blocks without turning nearby panel lines or shadows into
-layer ownership. The exact serialized x1 alpha becomes the canonical scale
-source for every layer. V5 then solves the complete PSD/ORA stack backwards in
-its real z-order. At each step it moves the preferred inpainted lower colour
-only as far as that layer's fixed 8-bit alpha can reproduce the selected master,
-then solves an exact 8-bit foreground colour using Pillow's integer compositing
-rule. Colour correction is therefore not allowed to raise alpha, close a glyph
-counter or create a detached opaque resampling lobe.
+V5 Pro deliberately separates background editability from exact source/master
+appearance:
 
-`manifest.json` records both `matte_cleanup` and `matte_qa`. Publication stops
-if a binary matte escapes semantic ownership, if source ViTMatte alpha escapes
-the clean topology, or if a scaled fractional matte escapes its audited narrow
-envelope. Every delivered alpha canvas must also equal its canonical scaled
-alpha byte-for-byte. Refined layers are compared spatially at alpha 64, 128 and
-192 using foreground-8/background-4 connectivity: missing or orphan components,
-merged glyphs, closed or invented holes, split counters and intrusion into a
-protected hole core all block publication. The source-stack preflight must
-converge without exceeding its per-layer safety cap. Flattened fidelity is still
-checked independently, so a clean-looking mask cannot pass merely by hiding a
-visual mismatch in the preview.
+- the bottom background is a synthesized clean plate over the **entire canvas**;
+  unowned source pixels are never baked back into that layer merely to make the
+  preview match;
+- the complement of active categorical `visible_alpha` ownership is copied
+  from the source/master into a real review layer named
+  `REVIEW - SOURCE REMAINDER (hide to reveal clean background)`. It is stacked
+  above extracted nodes, so it can preserve exact source pixels inside a clean
+  geometry node's hidden `full_support` without creating a second visible
+  owner;
+- every accepted panel/frame/line with a fitted reference records a
+  `geometry_cleanliness` policy. Its standalone PNG uses that reference across
+  the entire `full_support`; all observed RGB deviations and antialias pixels
+  that cannot be reproduced exactly by the reference are carved out of
+  `visible_alpha` and transferred to `SOURCE REMAINDER`. Hiding the remainder
+  therefore reveals clean editable geometry rather than a faint text/price
+  ghost. Residual-derived geometry without this evidence is unresolved and
+  non-move-safe. QA audits the exported `full_support`, not merely the carved
+  visible alpha: a frame needs one coherent ring with a dominant interior hole,
+  a panel must remain solid, and a line must not carry substantial structure on
+  its cross-axis.
+
+Keep `SOURCE REMAINDER` visible when the original source/master appearance must
+be preserved for comparison, scaling or continued editing. Hide it to reveal
+the full clean background and clean geometry surfaces. The layer can
+intentionally include visually quiet
+regions: at xN, two samples from the upscaled master may differ even where the
+source looked flat, so preserving the remainder makes recomposition
+deterministic for that run.
+
+This is a fidelity/safety layer, **not** a semantic object. It is exported as an
+unknown, non-move-safe node and must not be moved as though it were a logo,
+product or text layer. It deliberately starts unresolved and therefore makes
+the bundle `REVIEW_REQUIRED` while it awaits a user decision. Keeping or
+accepting it acknowledges a source-fidelity fallback; it does not prove those
+pixels were semantically decomposed or recover the original design graph.
+
+## Fail-closed status
+
+V5 Pro uses the exact status strings below:
+
+- `PASS`: proposal accounting is complete; no node remains unresolved; ownership
+  is exclusive; alpha stays inside semantic envelopes; clean-plate, recomposition
+  and required container round-trip gates pass.
+- `REVIEW_REQUIRED`: no hard failure was detected, but proposals/nodes — including
+  an unresolved `SOURCE REMAINDER`, geometry without a clean reference or an
+  impure text mask — residual background OCR or clean-plate evidence still need
+  a decision. This is a normal review outcome, not a hung render.
+- `FAIL`: a hard gate failed, such as overlapping ownership, escaped alpha, empty
+  exported nodes, failed clean-plate/container checks, recomposition error over
+  the configured one-level 8-bit limit, or an automatic-safety contradiction.
+  A node cannot claim `auto_confirmed` or move-safe when its metadata records a
+  failed semantic refinement, rejected/high-risk LayerD consolidation, or
+  missing/failed geometry-cleanliness or text-purity policy. A semantic compound
+  cannot claim atomic/auto-confirmed status, and exported geometry that violates
+  its frame/panel/line `full_support` topology is also a hard contradiction.
+
+`REVIEW_REQUIRED` is still atomically published to `OUTPUT\V5_LAYERS` so the
+user can inspect the evidence, review the checkpoint and rerun. A hard `FAIL`
+is not published and cannot replace the last good output. A close-looking
+preview or perfect flattening alone cannot prove that the decomposition is
+complete or uncontaminated. For a published bundle, always read
+`_KY_THUAT\QA_REPORT.html` and `manifest.json`.
 
 ## Output bundle
 
+For `PASS` and `REVIEW_REQUIRED`, the published directory
 `OUTPUT\V5_LAYERS\<name>_V5_LAYERS_xN\` contains:
 
-- `*_EDITABLE.psd`: Photoshop/Photopea-oriented pixel layers and groups, also
-  suitable for testing with Canva's current PSD importer;
-- `*_MASTER.ora`: open OpenRaster 0.0.6 master for Krita/GIMP;
-- `*_LAYERS.zip`: portable cropped RGBA PNGs, alpha masks, OCR JSON and a
-  portable manifest; it deliberately does not duplicate the PSD/ORA/previews;
-- `LAYERS\` and `MASKS\`: directly accessible assets with canvas offsets;
-- `*_PREVIEW.png`: recomposed visual result;
-- `*_LAYER_MAP.png` and `*_CONTACT_SHEET.png`: grouping QA;
-- `TEXT_OCR.json` and `manifest.json`: OCR hints, hashes, models, limits and QA.
+```text
+00_HUONG_DAN_MO_FILE.txt
+01_<name>_EDITABLE.psd          optional compatibility adapter
+02_<name>_MASTER.ora            OpenRaster 0.0.6 editable master
+03_<name>_PREVIEW.png           flattened QA reference
+04_<name>_CLEAN_BACKGROUND.png  synthesized clean plate over the full canvas
+05_<name>_LAYERS.zip            portable layer/mask/inventory/QA package
+06_<name>_CONTACT_SHEET.png     single sheet or bounded multipage cover
+CONTACT_SHEETS\page_*.png       present only for paginated large jobs
+LAYERS\                         cropped RGBA assets
+MASKS\                          matching alpha masks
+ELEMENT_INVENTORY.csv
+ELEMENT_INVENTORY.json
+manifest.json
+_KY_THUAT\                      review checkpoint and QA evidence
+```
 
-The PSD adapter is deliberately disabled above 30,000 px per axis or when the
-projected raw layer data exceeds 1.6 GB. `psd-tools` cannot yet be claimed as a
-reliable edited PSB writer beyond that boundary; V5 never writes PSD bytes with
-a fake `.psb` extension. ORA and the ZIP remain the open canonical outputs.
+Small jobs retain the single contact-sheet file. Large jobs paginate at no more
+than 32 cards per page; the cover and pages are each bounded to 4,096 pixels per
+axis and 16 megapixels. Page assets are recorded by the outer bundle manifest.
+The portable `05_*_LAYERS.zip` contract is unchanged and does not absorb the
+paginated contact-sheet directory.
 
-Open the file that fits the editor:
+The PSD/ORA stack and `LAYERS\` assets include the top `SOURCE REMAINDER` when
+source pixels remain outside categorical visible ownership, including observed
+deviations carved out of clean geometry. The default preview keeps that layer
+visible for source/master fidelity; `04_*_CLEAN_BACKGROUND.png` shows the
+underlying clean plate that is revealed when the review layer is hidden.
 
-- Photoshop or Photopea: use the PSD when present;
-- Krita or GIMP: use the OpenRaster master;
-- Canva: try the PSD importer first. If its current importer does not preserve
-  hierarchy/alpha correctly, upload the cropped RGBA files from `LAYERS`
-  manually and place them using each `canvas_offset` in `manifest.json`.
+The PSD adapter is omitted above 30,000 px on either axis or when projected raw
+layer data exceeds 1.6 GB. V5 never writes PSD bytes under a fake `.psb`
+extension. ORA plus cropped PNG/mask assets are the open interchange path when
+PSD is unsuitable. Canva/Photoshop import behaviour can change; test the actual
+bundle rather than assuming compatibility from a suffix.
 
-The preview is a QA reference, not the editable master.
+The preview is not an editable master and its presence does not mean `PASS`.
+V5 documents are finite RGB raster intermediates, not CMYK/PDF/X print files and
+not resolution-independent vectors.
 
-## What V5 can and cannot recover
+## Truth and editing limits
 
-- The masks and pixel layers are real; this is not a filename conversion.
-- OCR text remains raster pixels. A recognized label is **not** the original
-  font and is never presented as editable type.
-- Colour/topology cleanup and ViTMatte improve a finite raster boundary; they
-  do not rebuild the original font outline, emit SVG paths or provide infinite
-  zoom. Truly resolution-independent text/logo output still requires verified
-  native type or deliberate vector reconstruction.
-- A flat PNG/JPEG does not contain the old layer graph. V5 infers useful groups;
-  it cannot prove the original grouping.
-- No interchange standard can reconstruct a layer graph that was discarded.
-  OpenRaster 0.0.6 standardizes how the inferred layers are exchanged; it does
-  not standardize or prove the inference itself.
-- Pixels hidden behind an object do not exist in the flat source. V5 fills them
-  plausibly and marks the background as synthesized; it cannot recover the
-  exact unseen artwork.
-- For critical logos, prices, legal text and print jobs, inspect masks and the
-  cleaned lower layer at 100% before editing or printing.
-- PSD/Canva import behavior belongs to those applications and can change. Test
-  the actual generated bundle; a `.psd` suffix alone is not a compatibility
-  guarantee.
+- V5 creates real pixel layers, not renamed files, but their grouping is inferred.
+- A close or exact preview can be produced by `SOURCE REMAINDER` while semantic
+  decomposition is still incomplete; preview fidelity is not semantic proof.
+- OCR labels do not reconstruct the original font or create native Canva text.
+- Hidden pixels are synthesized from visible context. They cannot be recovered
+  exactly because they are absent from the flattened source.
+- OpenRaster standardizes exchange of the inferred stack; it does not validate
+  the inference or recreate a discarded layer graph.
+- `PASS` is a statement about the implemented gates, not a 99.99% guarantee,
+  infinite zoom or recovery of the original design file.
+- Prices, phone numbers, QR codes, legal text, logos and print-critical edges
+  must still be inspected at 100% before delivery.
 
-## Install/check
+## Install and offline checks
 
 ```powershell
 .\APP\engines\V5\setup_v5.ps1
 .\APP\engines\V5\setup_v5.ps1 -CheckOnly
 
-# Deliberate CPU-only installation (kept separate from a CUDA V3 runtime)
+# Deliberate CPU-only environment
 .\APP\engines\V5\setup_v5.ps1 -CpuOnly
 
-# Deliberately omit OCR on a restricted machine; keep the same flag for checks
+# Restricted machine: omit Tesseract deliberately and keep the flag for checks
 .\APP\engines\V5\setup_v5.ps1 -SkipTesseract
 .\APP\engines\V5\setup_v5.ps1 -CheckOnly -SkipTesseract
 ```
 
-The supported setup envelope is Windows 10/11 x64 with 64-bit CPython
-3.11-3.13. Setup reuses a compatible CUDA V3 environment when present to avoid
-duplicating several gigabytes. On a clean machine, or for a CPU-only install,
-it creates the isolated `V5\.venv`. A working `nvidia-smi` selects the official
-CUDA 12.6 wheel; otherwise setup selects the official CPU wheel. CPU extraction
-works but SAM and ViTMatte-S are much slower.
-On a CPU-only machine, use V5 at `n=1`. Creating a new V3 sharpening master
-for `n>1` is CUDA-only; an already validated local cache may be reused, but a
-clean CPU machine cannot generate that cache.
+The supported setup envelope is Windows 10/11 x64 with 64-bit CPython 3.11-3.13.
+Setup uses CUDA 12.6 wheels when `nvidia-smi` is available and otherwise creates
+an isolated CPU environment. V5 x1 can run on CPU, but DINO, SAM, BiRefNet and
+LayerD are substantially slower.
 
-Setup also checks for Tesseract. When it is missing, setup uses WinGet to
-install the revision-pinned Windows package recommended by Tesseract's Windows
-documentation, then downloads the exact official `tessdata_best` Vietnamese
-model. If Tesseract cannot be installed on a restricted machine, the deliberate
-fallback is `setup_v5.ps1 -SkipTesseract`; layer extraction still works, but OCR
-grouping/naming hints are disabled. A setup performed with `-SkipTesseract`
-must also use that flag with `-CheckOnly`.
+`model_setup.py` downloads and verifies five pinned Hugging Face weights:
 
-`-CheckOnly` is offline: it checks the exact runtime selected by `upscale.cmd`,
-all package pins and imports, all three Hugging Face revision/weight hashes, the
-LaMa hash, the Vietnamese model hash and an actual Tesseract language-load
-command. Model snapshots are pinned to exact revisions and all four large model
-artifacts are checked by SHA-256. No user artwork is uploaded.
+- `ZhengPeng7/BiRefNet_HR-matting`;
+- `cyberagent/layerd-birefnet`;
+- `facebook/sam2.1-hiera-base-plus`;
+- `IDEA-Research/grounding-dino-tiny`;
+- `hustvl/vitmatte-small-composition-1k`.
 
-Use `n=1` on a machine without the V3 super-resolution checkpoint set. `n>1`
-uses the audited V3 neural x4 master and therefore needs those three local V3
-checkpoints as well.
+The first four participate in the current Pro/semantic paths. The ViTMatte
+snapshot remains setup-verified for compatibility with the earlier V5 matte
+path; the active `layer_engine_v5_pro.py` does not use it as decomposition
+authority. Setup also verifies LaMa, the Vietnamese `vie.traineddata`, and the
+pinned Tesseract Windows installer when installation is needed.
 
-See `SOURCES.md` for exact upstream projects, revisions, formats and license
-notes.
+Normal rendering resolves model snapshots from the local cache and does not
+upload user artwork. `-CheckOnly` is offline and verifies dependency pins,
+imports, revisions and recorded SHA-256 values. See `SOURCES.md` and
+`MODEL_SHA256SUMS.txt` for the exact provenance recorded by the current source.

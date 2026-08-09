@@ -31,6 +31,10 @@
 **/venv/
 **/runtime/
 **/models/
+!/APP/engines/V5/vendor/LayerD/src/layerd/models/
+!/APP/engines/V5/vendor/LayerD/src/layerd/models/**
+!/APP/engines/V5/vendor/LayerD/src/layerd/_vendor/simple_lama_inpainting/models/
+!/APP/engines/V5/vendor/LayerD/src/layerd/_vendor/simple_lama_inpainting/models/**
 **/tools/
 *.pth
 *.pt

@@ -9,6 +9,16 @@ from huggingface_hub import snapshot_download
 
 MODELS = (
     (
+        "ZhengPeng7/BiRefNet_HR-matting",
+        "5d6b6f8adcb5b417c871b1d84ceaae9871355b7f",
+        "a5a4de698739ea5e0e8bbab28e1b293dde95092b87a442d566cbc585c53cef55",
+    ),
+    (
+        "cyberagent/layerd-birefnet",
+        "679f743cd001fb5d6360e59e8e1904678c5fa734",
+        "28f8acba2736067bf2eb8152f2d3ce75a388dd4e4e57f068b30760a8fe1c44d0",
+    ),
+    (
         "facebook/sam2.1-hiera-base-plus",
         "b7320756a13354e7530a63935656d35b2f91a290",
         "2012733a0de5d03efd1bba550a2847c4551be9ef2e0d497c83074df66189f780",
@@ -49,7 +59,11 @@ def main() -> int:
                     repo_id=repo_id,
                     revision=revision,
                     local_files_only=args.check_only,
-                    allow_patterns=("*.json", "*.safetensors", "vocab.txt"),
+                    # LayerD's BiRefNet snapshot contains revision-pinned
+                    # Transformers architecture files.  They are downloaded
+                    # and retained locally with the verified safetensors;
+                    # normal rendering remains offline.
+                    allow_patterns=("*.json", "*.safetensors", "*.py", "vocab.txt"),
                 )
             )
         except Exception as exc:
